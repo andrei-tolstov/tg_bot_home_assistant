@@ -13,8 +13,8 @@ RUN go mod download
 # Копирование исходного кода
 COPY . .
 
-# Сборка статического бинарного файла без CGO
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/bot .
+# Сборка статического бинарного файла без CGO в /usr/local/bin/tg-bot (чтобы не конфликтовать с директорией /app/bot)
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /usr/local/bin/tg-bot .
 
 # Финальный легковесный образ
 FROM alpine:latest
@@ -26,9 +26,9 @@ RUN apk --no-cache add ca-certificates tzdata && \
 WORKDIR /app
 
 # Копирование скомпилированного бинарного файла из этапа сборки
-COPY --from=builder /app/bot /app/bot
+COPY --from=builder /usr/local/bin/tg-bot /usr/local/bin/tg-bot
 
 # Запуск от имени непривилегированного пользователя
 USER botuser
 
-ENTRYPOINT ["/app/bot"]
+ENTRYPOINT ["/usr/local/bin/tg-bot"]

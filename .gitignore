@@ -180,3 +180,6 @@ Thumbs.db
 bin/
 bot.exe
 
+# Task management
+tasks/todo.md
+
