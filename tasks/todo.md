@@ -1,14 +1,13 @@
-# Задачи: Скрытие категорий с 0 устройств
+# Задачи: Создание Docker Compose конфигурации для бота
 
-- [x] В `bot/keyboards.go` (`GetDomainsKeyboard`) скрывать категории, в которых 0 устройств (`count == 0`)
-- [x] В `bot/handlers.go` (`showDomainsMenu`) обновить подсчет активных категорий и текст сообщения
-- [x] Обновить юнит-тесты в `bot/keyboards_test.go` (`TestGetDomainsKeyboard_HidesEmptyDomains`)
-- [x] Собрать бинарный файл `go build` и прогнать все тесты
-- [x] Перезапустить бота в фоновом режиме и проверить его логи
+- [x] Создать `.dockerignore` для оптимизации контекста сборки
+- [x] Создать `Dockerfile` с многоэтапной сборкой (multi-stage build), `ca-certificates` и non-root пользователем
+- [x] Создать `docker-compose.yml` с автоматическим перезапуском и подключением `.env`
 - [x] Зафиксировать результаты в `tasks/todo.md` и `tasks/lessons.md`
 
 ## Результаты
-- Категории с 0 устройств (`Шторы и жалюзи (0)`, `Водонагреватели (0)`, `Краны и клапаны (0)`, `Сирены (0)`, `Переключатели (0)`, `Сцены (0)`) теперь полностью скрыты из меню.
-- В меню отображаются исключительно активные категории, в которых есть хотя бы 1 устройство пользователя.
-- Счетчик в заголовке меню теперь считает только реальные активные категории.
-- Все юнит-тесты успешно пройдены, бот скомпилирован и перезапущен.
+- Создан [.dockerignore](file:///c:/Users/andrei/tg_bot_home_assistant/.dockerignore) (исключены лишние бинарники, старый python-код, логи и задачи).
+- Создан оптимизированный [Dockerfile](file:///c:/Users/andrei/tg_bot_home_assistant/Dockerfile) с multi-stage сборкой:
+  - Этап 1 (`builder`): сборка статического Go-бинарника без CGO (`CGO_ENABLED=0 GOOS=linux`).
+  - Этап 2 (`runner`): минимальный образ `alpine:latest` (~15 МБ), SSL-сертификаты `ca-certificates` для работы с Telegram API / Home Assistant API, таймзона `tzdata` и запуск от непривилегированного пользователя `botuser`.
+- Создан [docker-compose.yml](file:///c:/Users/andrei/tg_bot_home_assistant/docker-compose.yml) с подключением `.env`, политикой перезапуска `unless-stopped` и ротацией логов.

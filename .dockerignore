@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.env.example
+*.exe
+bot.exe
+old_bot_python/
+tasks/
+.system_generated/
+*.log
+scratch/
