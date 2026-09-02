@@ -22,6 +22,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 			b.showAllDevicesMenu(msg.Chat.ID, 0, false, 0)
 		case "domains", "categories":
 			b.showDomainsMenu(msg.Chat.ID, 0, false)
+		case "config", "settings":
+			b.showConfigDomainsMenu(msg.Chat.ID, 0, false)
 		case "toggle":
 			b.handleToggle(msg)
 		}
@@ -36,6 +38,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		b.showAllDevicesMenu(msg.Chat.ID, 0, false, 0)
 	case "📁 Устройства по доменам":
 		b.showDomainsMenu(msg.Chat.ID, 0, false)
+	case "⚙️ Конфигурация устройств", "⚙️ Конфигурация", "⚙️ Настройки":
+		b.showConfigDomainsMenu(msg.Chat.ID, 0, false)
 	}
 }
 
@@ -43,12 +47,14 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 	text := "👋 Привет! Я бот для управления твоим Home Assistant.\n\n" +
 		"Вы можете использовать быстрые кнопки внизу экрана:\n" +
 		"📊 <b>Статус HA</b> — проверка связи с сервером\n" +
-		"💡 <b>Все устройства</b> — общий список всех устройств с кнопками\n" +
-		"📁 <b>Устройства по доменам</b> — устройства по категориям (свет, розетки, автоматизации и др.)\n\n" +
+		"💡 <b>Все устройства</b> — общий список устройств управления\n" +
+		"📁 <b>Устройства по доменам</b> — устройства по категориям (свет, розетки и др.)\n" +
+		"⚙️ <b>Конфигурация устройств</b> — настройки и параметры (подсветка, таймеры и др.)\n\n" +
 		"Команды:\n" +
 		"• <code>/status</code> — проверить подключение к HA\n" +
-		"• <code>/devices</code> — общий список устройств\n" +
+		"• <code>/devices</code> — список устройств управления\n" +
 		"• <code>/domains</code> — категории устройств\n" +
+		"• <code>/config</code> — меню конфигурации и параметров\n" +
 		"• <code>/toggle &lt;entity_id&gt;</code> — ручное переключение по ID"
 
 	replyMsg := tgbotapi.NewMessage(msg.Chat.ID, text)
@@ -59,6 +65,7 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 		log.Printf("Ошибка отправки start-сообщения: %v", err)
 	}
 }
+
 
 func (b *Bot) handleStatus(msg *tgbotapi.Message) {
 	tempMsg := tgbotapi.NewMessage(msg.Chat.ID, "🔄 Проверяю подключение к Home Assistant...")
@@ -269,6 +276,174 @@ func (b *Bot) showDomainDevicesMenu(cbID string, chatID int64, messageID int, do
 	b.editMessage(editMsg)
 }
 
+func (b *Bot) showConfigDomainsMenu(chatID int64, messageID int, edit bool) {
+	ok, grouped, errMsg := b.haClient.GetConfigDevicesGroupedByDomain()
+
+	if !ok {
+		text := fmt.Sprintf("❌ Не удалось получить список настроек:\n%s", html.EscapeString(errMsg))
+		if edit {
+			b.editMessage(tgbotapi.NewEditMessageText(chatID, messageID, text))
+		} else {
+			msg := tgbotapi.NewMessage(chatID, text)
+			if _, err := b.api.Send(msg); err != nil {
+				log.Printf("Ошибка отправки сообщения: %v", err)
+			}
+		}
+		return
+	}
+
+	totalDevices := 0
+	activeCategories := 0
+	for _, items := range grouped {
+		count := len(items)
+		totalDevices += count
+		if count > 0 {
+			activeCategories++
+		}
+	}
+
+	if activeCategories == 0 {
+		text := "⚙️ <b>Конфигурация устройств:</b>\n\nℹ️ В Home Assistant пока не найдено устройств с доступными параметрами настроек."
+		if edit {
+			b.editMessage(tgbotapi.NewEditMessageText(chatID, messageID, text))
+		} else {
+			msg := tgbotapi.NewMessage(chatID, text)
+			msg.ParseMode = tgbotapi.ModeHTML
+			if _, err := b.api.Send(msg); err != nil {
+				log.Printf("Ошибка отправки категорий: %v", err)
+			}
+		}
+		return
+	}
+
+	text := fmt.Sprintf(
+		"⚙️ <b>Конфигурация устройств Home Assistant:</b>\nВсего категорий: %d, настраиваемых устройств: %d\n\nВыберите категорию для настройки параметров:",
+		activeCategories,
+		totalDevices,
+	)
+	keyboard := GetConfigDomainsKeyboard(grouped)
+
+	if edit {
+		editMsg := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, text, keyboard)
+		editMsg.ParseMode = tgbotapi.ModeHTML
+		b.editMessage(editMsg)
+	} else {
+		msg := tgbotapi.NewMessage(chatID, text)
+		msg.ParseMode = tgbotapi.ModeHTML
+		msg.ReplyMarkup = keyboard
+		if _, err := b.api.Send(msg); err != nil {
+			log.Printf("Ошибка отправки категорий: %v", err)
+		}
+	}
+}
+
+func (b *Bot) showConfigDevicesMenu(cbID string, chatID int64, messageID int, domain string, page int) {
+	ok, devices, errMsg := b.haClient.GetConfigDevicesForDomain(domain)
+
+	domainName := DomainNames[domain]
+	if domainName == "" {
+		domainName = domain
+	}
+	escapedDomainName := html.EscapeString(domainName)
+
+	domainIcon := DomainIcons[domain]
+	if domainIcon == "" {
+		domainIcon = "⚙️"
+	}
+
+	if !ok {
+		callbackAlert := tgbotapi.NewCallbackWithAlert(cbID, fmt.Sprintf("Ошибка: %s", errMsg))
+		_, _ = b.api.Request(callbackAlert)
+		return
+	}
+
+	pageSize := DefaultPageSize
+	totalPages := (len(devices) + pageSize - 1) / pageSize
+	if totalPages <= 0 {
+		totalPages = 1
+	}
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+
+	var text string
+	if len(devices) == 0 {
+		text = fmt.Sprintf(
+			"⚙️ %s <b>Настройка: %s</b> (0 устройств)\n\nℹ️ В этой категории нет устройств с настраиваемыми параметрами.",
+			domainIcon,
+			escapedDomainName,
+		)
+	} else if totalPages > 1 {
+		text = fmt.Sprintf(
+			"⚙️ %s <b>Настройка: %s</b> (%d устройств, стр. %d/%d)\nВыберите устройство для изменения параметров:",
+			domainIcon,
+			escapedDomainName,
+			len(devices),
+			page+1,
+			totalPages,
+		)
+	} else {
+		text = fmt.Sprintf(
+			"⚙️ %s <b>Настройка: %s</b> (%d устройств)\nВыберите устройство для изменения параметров:",
+			domainIcon,
+			escapedDomainName,
+			len(devices),
+		)
+	}
+
+	keyboard := GetConfigDevicesKeyboard(domain, devices, page, pageSize)
+	editMsg := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, text, keyboard)
+	editMsg.ParseMode = tgbotapi.ModeHTML
+	b.editMessage(editMsg)
+}
+
+func (b *Bot) showDeviceSettingsMenu(cbID string, chatID int64, messageID int, deviceID string, domain string) {
+	ok, device, errMsg := b.haClient.GetDeviceConfig(deviceID)
+	if !ok || device == nil {
+		if cbID != "" {
+			callbackAlert := tgbotapi.NewCallbackWithAlert(cbID, fmt.Sprintf("Ошибка: %s", errMsg))
+			_, _ = b.api.Request(callbackAlert)
+		}
+		return
+	}
+
+	icon := DomainIcons[device.Domain]
+	if icon == "" {
+		icon = "⚙️"
+	}
+
+	text := fmt.Sprintf(
+		"⚙️ %s <b>Параметры устройства: %s</b>\n\nНажмите на параметр для изменения:",
+		icon,
+		html.EscapeString(device.DeviceName),
+	)
+
+	keyboard := GetDeviceSettingsKeyboard(*device, domain)
+	editMsg := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, text, keyboard)
+	editMsg.ParseMode = tgbotapi.ModeHTML
+	b.editMessage(editMsg)
+}
+
+func (b *Bot) findDeviceForEntity(entityID string) (string, string) {
+	ok, grouped, _ := b.haClient.GetConfigDevicesGroupedByDomain()
+	if !ok {
+		return "", ""
+	}
+	for domain, devices := range grouped {
+		for _, dev := range devices {
+			for _, cfg := range dev.ConfigEntities {
+				if cfg.EntityID == entityID {
+					return dev.DeviceID, domain
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
 func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	if cb.Message == nil {
 		return
@@ -304,7 +479,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	if strings.HasPrefix(cb.Data, "t:") {
 		raw := strings.TrimPrefix(cb.Data, "t:")
 		parts := strings.Split(raw, ":")
-		entityID := parts[0]
+		entityID := ResolveEntityRef(parts[0])
 		page := 0
 		if len(parts) > 1 {
 			page, _ = strconv.Atoi(parts[1])
@@ -370,7 +545,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	if strings.HasPrefix(cb.Data, "dt:") {
 		raw := strings.TrimPrefix(cb.Data, "dt:")
 		parts := strings.Split(raw, ":")
-		entityID := parts[0]
+		entityID := ResolveEntityRef(parts[0])
 		page := 0
 		if len(parts) > 1 {
 			page, _ = strconv.Atoi(parts[1])
@@ -388,6 +563,173 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		b.showDomainDevicesMenu(cb.ID, chatID, messageID, domain, page)
 		return
 	}
+
+	// --- Обработка меню конфигурации устройств ---
+
+	if cb.Data == "b_cdm" || cb.Data == "r_cdm" {
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "🔄 Загружаю настройки..."))
+		b.showConfigDomainsMenu(chatID, messageID, true)
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "cdm:") {
+		domain := strings.TrimPrefix(cb.Data, "cdm:")
+		b.showConfigDevicesMenu(cb.ID, chatID, messageID, domain, 0)
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "rdc:") {
+		raw := strings.TrimPrefix(cb.Data, "rdc:")
+		parts := strings.Split(raw, ":")
+		domain := parts[0]
+		page := 0
+		if len(parts) > 1 {
+			page, _ = strconv.Atoi(parts[1])
+		}
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "🔄 Обновляю..."))
+		b.showConfigDevicesMenu(cb.ID, chatID, messageID, domain, page)
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "pdc:") {
+		raw := strings.TrimPrefix(cb.Data, "pdc:")
+		parts := strings.Split(raw, ":")
+		domain := parts[0]
+		page := 0
+		if len(parts) > 1 {
+			page, _ = strconv.Atoi(parts[1])
+		}
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+		b.showConfigDevicesMenu(cb.ID, chatID, messageID, domain, page)
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "cds:") {
+		raw := strings.TrimPrefix(cb.Data, "cds:")
+		parts := strings.Split(raw, ":")
+		deviceID := ResolveEntityRef(parts[0])
+		domain := ""
+		if len(parts) > 1 {
+			domain = parts[1]
+		}
+		b.showDeviceSettingsMenu(cb.ID, chatID, messageID, deviceID, domain)
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "r_cds:") {
+		raw := strings.TrimPrefix(cb.Data, "r_cds:")
+		parts := strings.Split(raw, ":")
+		deviceID := ResolveEntityRef(parts[0])
+		domain := ""
+		if len(parts) > 1 {
+			domain = parts[1]
+		}
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "🔄 Обновляю параметры..."))
+		b.showDeviceSettingsMenu(cb.ID, chatID, messageID, deviceID, domain)
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "b_cdev:") {
+		domain := strings.TrimPrefix(cb.Data, "b_cdev:")
+		b.showConfigDevicesMenu(cb.ID, chatID, messageID, domain, 0)
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "cft:") {
+		entityID := ResolveEntityRef(strings.TrimPrefix(cb.Data, "cft:"))
+		domain := strings.Split(entityID, ".")[0]
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "⏳ Переключаю..."))
+		ok, msg := b.haClient.CallService(domain, "toggle", map[string]interface{}{"entity_id": entityID})
+		if !ok {
+			_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, fmt.Sprintf("❌ Ошибка: %s", msg)))
+			return
+		}
+		deviceID, devDomain := b.findDeviceForEntity(entityID)
+		if deviceID != "" {
+			b.showDeviceSettingsMenu(cb.ID, chatID, messageID, deviceID, devDomain)
+		}
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "cfp:") {
+		entityID := ResolveEntityRef(strings.TrimPrefix(cb.Data, "cfp:"))
+		domain := strings.Split(entityID, ".")[0]
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "⏳ Выполняю..."))
+		ok, msg := b.haClient.CallService(domain, "press", map[string]interface{}{"entity_id": entityID})
+		if !ok {
+			_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, fmt.Sprintf("❌ Ошибка: %s", msg)))
+			return
+		}
+		deviceID, devDomain := b.findDeviceForEntity(entityID)
+		if deviceID != "" {
+			b.showDeviceSettingsMenu(cb.ID, chatID, messageID, deviceID, devDomain)
+		}
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "cfs:") {
+		entityID := ResolveEntityRef(strings.TrimPrefix(cb.Data, "cfs:"))
+		domain := strings.Split(entityID, ".")[0]
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "⏳ Переключаю режим..."))
+		ok, msg := b.haClient.CallService(domain, "select_next", map[string]interface{}{"entity_id": entityID, "cycle": true})
+		if !ok {
+			_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, fmt.Sprintf("❌ Ошибка: %s", msg)))
+			return
+		}
+		deviceID, devDomain := b.findDeviceForEntity(entityID)
+		if deviceID != "" {
+			b.showDeviceSettingsMenu(cb.ID, chatID, messageID, deviceID, devDomain)
+		}
+		return
+	}
+
+	if strings.HasPrefix(cb.Data, "cfn:") {
+		raw := strings.TrimPrefix(cb.Data, "cfn:")
+		parts := strings.Split(raw, ":")
+		if len(parts) >= 2 {
+			entityID := ResolveEntityRef(parts[0])
+			delta, _ := strconv.ParseFloat(parts[1], 64)
+
+			stateObj, err := b.haClient.GetEntityState(entityID)
+			if err != nil || stateObj == nil {
+				_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, "❌ Не удалось получить состояние"))
+				return
+			}
+
+			currentVal, err := strconv.ParseFloat(stateObj.State, 64)
+			if err != nil {
+				currentVal = 0
+			}
+
+			newVal := currentVal + delta
+			if stateObj.Attributes != nil {
+				if minVal, ok := stateObj.Attributes["min"].(float64); ok && newVal < minVal {
+					newVal = minVal
+				}
+				if maxVal, ok := stateObj.Attributes["max"].(float64); ok && newVal > maxVal {
+					newVal = maxVal
+				}
+			}
+
+			domain := strings.Split(entityID, ".")[0]
+			_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "⏳ Устанавливаю значение..."))
+			ok, msg := b.haClient.CallService(domain, "set_value", map[string]interface{}{
+				"entity_id": entityID,
+				"value":     newVal,
+			})
+			if !ok {
+				_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, fmt.Sprintf("❌ Ошибка: %s", msg)))
+				return
+			}
+
+			deviceID, devDomain := b.findDeviceForEntity(entityID)
+			if deviceID != "" {
+				b.showDeviceSettingsMenu(cb.ID, chatID, messageID, deviceID, devDomain)
+			}
+			return
+		}
+	}
+
 }
 
 func (b *Bot) handleToggle(msg *tgbotapi.Message) {
@@ -444,3 +786,4 @@ func (b *Bot) handleToggle(msg *tgbotapi.Message) {
 		}
 	}
 }
+

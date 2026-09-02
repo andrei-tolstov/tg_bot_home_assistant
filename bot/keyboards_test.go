@@ -213,3 +213,234 @@ func TestGetDomainsKeyboard_HidesEmptyDomains(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatConfigEntityButton(t *testing.T) {
+	tests := []struct {
+		name     string
+		entity   ha.Entity
+		contains []string
+	}{
+		{
+			name: "switch config on",
+			entity: ha.Entity{
+				EntityID:     "switch.backlight",
+				Domain:       "switch",
+				FriendlyName: "Подсветка клавиш",
+				State:        "on",
+				Category:     "config",
+			},
+			contains: []string{"🔌", "Подсветка клавиш", "🟢 ВКЛ"},
+		},
+		{
+			name: "button config",
+			entity: ha.Entity{
+				EntityID:     "button.restart",
+				Domain:       "button",
+				FriendlyName: "Перезагрузка",
+				Category:     "config",
+			},
+			contains: []string{"🔘", "Перезагрузка", "Нажать"},
+		},
+		{
+			name: "select config",
+			entity: ha.Entity{
+				EntityID:     "select.power_on_mode",
+				Domain:       "select",
+				FriendlyName: "Режим включения",
+				State:        "previous",
+				Category:     "config",
+			},
+			contains: []string{"📋", "Режим включения", "previous"},
+		},
+		{
+			name: "number config with unit",
+			entity: ha.Entity{
+				EntityID:     "number.auto_off_timer",
+				Domain:       "number",
+				FriendlyName: "Таймер автовыключения",
+				State:        "15",
+				Category:     "config",
+				Attributes: map[string]interface{}{
+					"unit_of_measurement": "мин",
+				},
+			},
+			contains: []string{"⏱️", "Таймер автовыключения", "15 мин"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := FormatConfigEntityButton(tt.entity)
+			for _, exp := range tt.contains {
+				if !strings.Contains(res, exp) {
+					t.Errorf("FormatConfigEntityButton() = %q, expected to contain %q", res, exp)
+				}
+			}
+		})
+	}
+}
+
+func TestGetDeviceSettingsKeyboard_CallbackDataLimits(t *testing.T) {
+	dev := ha.DeviceConfigGroup{
+		DeviceID:   "dev_long_identifier_1234567890abcdef",
+		DeviceName: "Выключатель двухклавишный на кухне",
+		Domain:     "switch",
+		ConfigEntities: []ha.Entity{
+			{
+				EntityID:     "switch.kitchen_switch_button_led_indicator_backlight_mode",
+				Domain:       "switch",
+				FriendlyName: "Подсветка",
+				State:        "on",
+				Category:     "config",
+			},
+			{
+				EntityID:     "number.kitchen_switch_button_auto_turn_off_timer_countdown",
+				Domain:       "number",
+				FriendlyName: "Таймер выключения",
+				State:        "5",
+				Category:     "config",
+			},
+			{
+				EntityID:     "select.kitchen_switch_relay_power_on_behavior_mode_state",
+				Domain:       "select",
+				FriendlyName: "Поведение при подаче питания",
+				State:        "on",
+				Category:     "config",
+			},
+			{
+				EntityID:     "button.kitchen_switch_restart_controller_hardware",
+				Domain:       "button",
+				FriendlyName: "Перезагрузка",
+				Category:     "config",
+			},
+		},
+	}
+
+	kb := GetDeviceSettingsKeyboard(dev, "switch")
+	if len(kb.InlineKeyboard) == 0 {
+		t.Fatal("expected keyboard rows, got 0")
+	}
+
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData == nil {
+				continue
+			}
+			cbData := *btn.CallbackData
+			if len([]byte(cbData)) > 64 {
+				t.Errorf("CallbackData %q exceeds 64 bytes limit: len is %d", cbData, len([]byte(cbData)))
+			}
+		}
+	}
+}
+
+func TestGetConfigDomainsKeyboard(t *testing.T) {
+	grouped := map[string][]ha.DeviceConfigGroup{
+		"switch": {
+			{
+				DeviceID:   "dev_1",
+				DeviceName: "Розетка на кухне",
+				Domain:     "switch",
+				ConfigEntities: []ha.Entity{
+					{EntityID: "switch.dev1_backlight", FriendlyName: "Подсветка", State: "on", Category: "config"},
+				},
+			},
+		},
+		"light": {
+			{
+				DeviceID:   "dev_2",
+				DeviceName: "Люстра",
+				Domain:     "light",
+				ConfigEntities: []ha.Entity{
+					{EntityID: "number.dev2_timer", FriendlyName: "Таймер", State: "10", Category: "config"},
+				},
+			},
+		},
+		"climate": {}, // пустая категория
+	}
+
+	kb := GetConfigDomainsKeyboard(grouped)
+	if len(kb.InlineKeyboard) == 0 {
+		t.Fatal("expected non-empty keyboard")
+	}
+
+	var foundSwitch, foundLight, foundClimate bool
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData != nil && len([]byte(*btn.CallbackData)) > 64 {
+				t.Errorf("CallbackData %q exceeds 64 bytes", *btn.CallbackData)
+			}
+			if strings.Contains(btn.Text, "Розетки") {
+				foundSwitch = true
+			}
+			if strings.Contains(btn.Text, "Освещение") {
+				foundLight = true
+			}
+			if strings.Contains(btn.Text, "Климат") {
+				foundClimate = true
+			}
+		}
+	}
+
+	if !foundSwitch {
+		t.Error("expected switch category to be present")
+	}
+	if !foundLight {
+		t.Error("expected light category to be present")
+	}
+	if foundClimate {
+		t.Error("expected empty climate category to be omitted")
+	}
+}
+
+func TestGetConfigDevicesKeyboard_Pagination(t *testing.T) {
+	var devices []ha.DeviceConfigGroup
+	for i := 0; i < 25; i++ {
+		devices = append(devices, ha.DeviceConfigGroup{
+			DeviceID:   fmt.Sprintf("dev_id_%d", i),
+			DeviceName: fmt.Sprintf("Устройство %d", i),
+			Domain:     "switch",
+			ConfigEntities: []ha.Entity{
+				{EntityID: fmt.Sprintf("switch.dev_%d_led", i), FriendlyName: "LED", State: "on", Category: "config"},
+			},
+		})
+	}
+
+	kb := GetConfigDevicesKeyboard("switch", devices, 0, 10)
+	if len(kb.InlineKeyboard) != 12 { // 10 devices + 1 nav + 1 bottom
+		t.Fatalf("expected 12 rows, got %d", len(kb.InlineKeyboard))
+	}
+
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData != nil && len([]byte(*btn.CallbackData)) > 64 {
+				t.Errorf("CallbackData %q exceeds 64 bytes limit", *btn.CallbackData)
+			}
+		}
+	}
+}
+
+func TestResolveEntityRef(t *testing.T) {
+	shortID := "switch.kitchen"
+	ref1 := GetEntityRef(shortID)
+	if ref1 != shortID {
+		t.Errorf("expected short ID %q to remain unchanged, got %q", shortID, ref1)
+	}
+	if resolved := ResolveEntityRef(ref1); resolved != shortID {
+		t.Errorf("expected resolved %q, got %q", shortID, resolved)
+	}
+
+	longID := "switch.living_room_super_long_entity_name_that_exceeds_forty_characters_limit"
+	ref2 := GetEntityRef(longID)
+	if !strings.HasPrefix(ref2, "h_") {
+		t.Errorf("expected long ID to be hashed with prefix 'h_', got %q", ref2)
+	}
+	if len(ref2) > 12 {
+		t.Errorf("expected compact hash length <= 12, got %d (%q)", len(ref2), ref2)
+	}
+	if resolved := ResolveEntityRef(ref2); resolved != longID {
+		t.Errorf("expected resolved %q, got %q", longID, resolved)
+	}
+}
+
+
