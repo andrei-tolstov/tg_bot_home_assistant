@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"tg_bot_home_assistant/config"
@@ -21,7 +23,12 @@ type Bot struct {
 
 // NewBot создает и инициализирует новый экземпляр Bot.
 func NewBot(cfg *config.Config, haClient *ha.Client) (*Bot, error) {
-	api, err := tgbotapi.NewBotAPI(cfg.TelegramBotToken)
+	// Явный таймаут для Telegram API: опрос Long Polling длится до 30с,
+	// поэтому таймаут 45с гарантирует разрыв мертвого TCP-сокета при сетевых сбоях.
+	httpClient := &http.Client{
+		Timeout: 45 * time.Second,
+	}
+	api, err := tgbotapi.NewBotAPIWithClient(cfg.TelegramBotToken, tgbotapi.APIEndpoint, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("ошибка создания экземпляра Telegram Bot API: %w", err)
 	}
