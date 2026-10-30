@@ -16,6 +16,7 @@ type Config struct {
 	AllowedUserID    int64
 	HAURL            string
 	HAToken          string
+	NotifyOnStartup  bool
 }
 
 // LoadConfig загружает настройки из файла .env и переменных окружения.
@@ -51,10 +52,17 @@ func LoadConfig() (*Config, error) {
 		return nil, errors.New("ALLOWED_USER_ID должен быть числом")
 	}
 
+	notifyStartupStr := strings.ToLower(strings.TrimSpace(os.Getenv("NOTIFY_ON_STARTUP")))
+	notifyOnStartup := true
+	if notifyStartupStr == "false" || notifyStartupStr == "0" || notifyStartupStr == "no" {
+		notifyOnStartup = false
+	}
+
 	return &Config{
 		TelegramBotToken: tgToken,
 		AllowedUserID:    allowedUserID,
 		HAURL:            strings.TrimRight(haURL, "/"),
 		HAToken:          haToken,
+		NotifyOnStartup:  notifyOnStartup,
 	}, nil
 }

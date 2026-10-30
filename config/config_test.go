@@ -34,6 +34,33 @@ func TestLoadConfig_Success(t *testing.T) {
 	if cfg.HAToken != "test_ha_token" {
 		t.Errorf("expected test_ha_token, got %s", cfg.HAToken)
 	}
+	if !cfg.NotifyOnStartup {
+		t.Errorf("expected NotifyOnStartup to be true by default, got false")
+	}
+}
+
+func TestLoadConfig_NotifyOnStartup_Disabled(t *testing.T) {
+	os.Setenv("TELEGRAM_BOT_TOKEN", "test_token_123")
+	os.Setenv("ALLOWED_USER_ID", "123456789")
+	os.Setenv("HA_URL", "http://192.168.1.100:8123")
+	os.Setenv("HA_TOKEN", "test_ha_token")
+	os.Setenv("NOTIFY_ON_STARTUP", "false")
+	defer func() {
+		os.Unsetenv("TELEGRAM_BOT_TOKEN")
+		os.Unsetenv("ALLOWED_USER_ID")
+		os.Unsetenv("HA_URL")
+		os.Unsetenv("HA_TOKEN")
+		os.Unsetenv("NOTIFY_ON_STARTUP")
+	}()
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if cfg.NotifyOnStartup {
+		t.Errorf("expected NotifyOnStartup to be false, got true")
+	}
 }
 
 func TestLoadConfig_MissingEnv(t *testing.T) {

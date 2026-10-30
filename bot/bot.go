@@ -44,6 +44,9 @@ func NewBot(cfg *config.Config, haClient *ha.Client) (*Bot, error) {
 
 // Start запускает опрос обновлений Telegram (Long Polling) с поддержкой graceful shutdown.
 func (b *Bot) Start(ctx context.Context) {
+	// Отправка уведомления о запуске бота пользователю (для фиксации включения электричества)
+	b.sendStartupNotification(ctx)
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 30
 
@@ -65,6 +68,53 @@ func (b *Bot) Start(ctx context.Context) {
 			go b.safeHandleUpdate(update)
 		}
 	}
+}
+
+// formatStartupMessage формирует текст сообщения при запуске бота.
+func formatStartupMessage(t time.Time) string {
+	return fmt.Sprintf("⚡️ <b>Бот Home Assistant запущен!</b>\n\n🕒 <b>Время запуска:</b> <code>%s</code>\n💡 <i>Электричество включено, бот успешно возобновил работу.</i>", t.Format("02.01.2006 15:04:05"))
+}
+
+// sendStartupNotification отправляет уведомление о старте бота авторизованному пользователю.
+func (b *Bot) sendStartupNotification(ctx context.Context) {
+	if !b.cfg.NotifyOnStartup || b.cfg.AllowedUserID == 0 {
+		return
+	}
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Паника при отправке уведомления о запуске: %v\nСтек:\n%s", r, debug.Stack())
+			}
+		}()
+
+		text := formatStartupMessage(time.Now())
+		msg := tgbotapi.NewMessage(b.cfg.AllowedUserID, text)
+		msg.ParseMode = tgbotapi.ModeHTML
+		msg.ReplyMarkup = GetMainKeyboard()
+
+		const maxAttempts = 3
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if _, err := b.api.Send(msg); err != nil {
+				log.Printf("Попытка %d/%d: ошибка отправки уведомления о запуске (chat_id=%d): %v", attempt, maxAttempts, b.cfg.AllowedUserID, err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
+			log.Printf("Уведомление о запуске бота успешно отправлено пользователю %d", b.cfg.AllowedUserID)
+			return
+		}
+		log.Printf("Не удалось отправить уведомление о запуске бота после %d попыток", maxAttempts)
+	}()
 }
 
 // safeHandleUpdate безопасно обрабатывает обновление в отдельной горутине с защитой от паники и проверкой прав доступа.
