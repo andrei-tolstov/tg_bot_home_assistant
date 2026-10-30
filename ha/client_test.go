@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
@@ -318,6 +319,129 @@ func TestClient_CallService(t *testing.T) {
 	}
 	if reqBody["entity_id"] != "light.living_room" {
 		t.Errorf("expected entity_id light.living_room, got %v", reqBody["entity_id"])
+	}
+}
+
+func TestGetDomainPriority(t *testing.T) {
+	if GetDomainPriority("light") != 1 {
+		t.Errorf("expected priority 1 for light, got %d", GetDomainPriority("light"))
+	}
+	if GetDomainPriority("switch") != 2 {
+		t.Errorf("expected priority 2 for switch, got %d", GetDomainPriority("switch"))
+	}
+	if GetDomainPriority("unknown_custom_domain") != 50 {
+		t.Errorf("expected default priority 50 for unknown domain, got %d", GetDomainPriority("unknown_custom_domain"))
+	}
+}
+
+func TestClient_WebSocket_CacheAndInvalidate(t *testing.T) {
+	var wsConnections int
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/states" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]EntityState{
+				{EntityID: "switch.test", State: "on"},
+			})
+			return
+		}
+		if r.URL.Path == "/api/websocket" {
+			wsConnections++
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			_ = conn.WriteJSON(map[string]string{"type": "auth_required"})
+			var authMsg map[string]string
+			_ = conn.ReadJSON(&authMsg)
+			_ = conn.WriteJSON(map[string]string{"type": "auth_ok"})
+
+			var req1 map[string]interface{}
+			_ = conn.ReadJSON(&req1)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req1["id"],
+				"type":    "result",
+				"success": true,
+				"result":  []wsEntityEntry{},
+			})
+
+			var req2 map[string]interface{}
+			_ = conn.ReadJSON(&req2)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req2["id"],
+				"type":    "result",
+				"success": true,
+				"result":  []wsDeviceEntry{},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+
+	// 1-й вызов GetAllEntities: должно открыться 1 WS-соединение
+	ok, _, _ := client.GetAllEntities()
+	if !ok {
+		t.Fatal("expected first GetAllEntities to succeed")
+	}
+	if wsConnections != 1 {
+		t.Fatalf("expected 1 WS connection, got %d", wsConnections)
+	}
+
+	// 2-й вызов GetAllEntities: должен использоваться кэш, WS соединение не открывается
+	ok, _, _ = client.GetAllEntities()
+	if !ok {
+		t.Fatal("expected second GetAllEntities to succeed")
+	}
+	if wsConnections != 1 {
+		t.Fatalf("expected WS connection count to remain 1 due to cache, got %d", wsConnections)
+	}
+
+	// Сбрасываем кэш
+	client.InvalidateCache()
+
+	// 3-й вызов: кэш сброшен, открывается 2-е соединение
+	ok, _, _ = client.GetAllEntities()
+	if !ok {
+		t.Fatal("expected third GetAllEntities to succeed")
+	}
+	if wsConnections != 2 {
+		t.Fatalf("expected 2 WS connections after InvalidateCache, got %d", wsConnections)
+	}
+}
+
+func TestClient_WebSocket_AuthFailed(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/websocket" {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			_ = conn.WriteJSON(map[string]string{"type": "auth_required"})
+			var authMsg map[string]string
+			_ = conn.ReadJSON(&authMsg)
+			_ = conn.WriteJSON(map[string]string{"type": "auth_invalid", "message": "Invalid password"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "wrong_token")
+	_, _, err := client.FetchRegistriesWS()
+	if err == nil {
+		t.Fatal("expected error for failed auth, got nil")
+	}
+	if !strings.Contains(err.Error(), "auth failed") {
+		t.Errorf("expected error to contain 'auth failed', got %v", err)
 	}
 }
 

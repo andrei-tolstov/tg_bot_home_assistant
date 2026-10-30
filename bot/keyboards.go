@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -52,6 +53,57 @@ func ResolveEntityRef(ref string) string {
 		}
 	}
 	return ref
+}
+
+// HasEntityRef проверяет, известен ли хэш в таблице соответствия.
+func HasEntityRef(ref string) bool {
+	if !strings.HasPrefix(ref, "h_") && !strings.HasPrefix(ref, "d_") {
+		return true
+	}
+	entityMapMutex.RLock()
+	defer entityMapMutex.RUnlock()
+	_, ok := entityHashMap[ref]
+	return ok
+}
+
+// WarmupEntityRefs заполняет таблицу хэшей для всех длинных идентификаторов сущностей и устройств.
+func WarmupEntityRefs(entities []ha.Entity) {
+	entityMapMutex.Lock()
+	defer entityMapMutex.Unlock()
+	for _, ent := range entities {
+		if len(ent.EntityID) > 40 {
+			hash := fmt.Sprintf("h_%08x", crc32.ChecksumIEEE([]byte(ent.EntityID)))
+			entityHashMap[hash] = ent.EntityID
+		}
+		if len(ent.DeviceID) > 32 {
+			hash := fmt.Sprintf("d_%08x", crc32.ChecksumIEEE([]byte(ent.DeviceID)))
+			entityHashMap[hash] = ent.DeviceID
+		}
+	}
+}
+
+// paginate вычисляет параметры пагинации: totalPages, pageClamped, start, end.
+func paginate(total, page, pageSize int) (totalPages, pageClamped, start, end int) {
+	if pageSize <= 0 {
+		pageSize = DefaultPageSize
+	}
+	totalPages = (total + pageSize - 1) / pageSize
+	if totalPages <= 0 {
+		totalPages = 1
+	}
+	pageClamped = page
+	if pageClamped < 0 {
+		pageClamped = 0
+	}
+	if pageClamped >= totalPages {
+		pageClamped = totalPages - 1
+	}
+	start = pageClamped * pageSize
+	end = start + pageSize
+	if end > total {
+		end = total
+	}
+	return totalPages, pageClamped, start, end
 }
 
 
@@ -158,33 +210,13 @@ func FormatDeviceButton(item ha.Entity) string {
 
 // GetDevicesKeyboard возвращает инлайн-клавиатуру со списком всех устройств с поддержкой пагинации.
 func GetDevicesKeyboard(devices []ha.Entity, page, pageSize int) tgbotapi.InlineKeyboardMarkup {
-	if pageSize <= 0 {
-		pageSize = DefaultPageSize
-	}
-
-	total := len(devices)
-	totalPages := (total + pageSize - 1) / pageSize
-	if totalPages <= 0 {
-		totalPages = 1
-	}
-	if page < 0 {
-		page = 0
-	}
-	if page >= totalPages {
-		page = totalPages - 1
-	}
-
-	start := page * pageSize
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
+	totalPages, pageClamped, start, end := paginate(len(devices), page, pageSize)
 
 	var rows [][]tgbotapi.InlineKeyboardButton
-	if start < total {
+	if start < len(devices) {
 		for _, item := range devices[start:end] {
 			btnText := FormatDeviceButton(item)
-			cbData := fmt.Sprintf("t:%s:%d", GetEntityRef(item.EntityID), page)
+			cbData := fmt.Sprintf("t:%s:%d", GetEntityRef(item.EntityID), pageClamped)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
@@ -193,18 +225,18 @@ func GetDevicesKeyboard(devices []ha.Entity, page, pageSize int) tgbotapi.Inline
 
 	if totalPages > 1 {
 		var navRow []tgbotapi.InlineKeyboardButton
-		if page > 0 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("pa:%d", page-1)))
+		if pageClamped > 0 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("pa:%d", pageClamped-1)))
 		}
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", page+1, totalPages), "noop"))
-		if page < totalPages-1 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("pa:%d", page+1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", pageClamped+1, totalPages), "noop"))
+		if pageClamped < totalPages-1 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("pa:%d", pageClamped+1)))
 		}
 		rows = append(rows, navRow)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить список устройств", fmt.Sprintf("r_all:%d", page)),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить список устройств", fmt.Sprintf("r_all:%d", pageClamped)),
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -221,25 +253,6 @@ func capitalize(s string) string {
 // GetDomainsKeyboard возвращает инлайн-клавиатуру со списком категорий (доменов) и количеством устройств.
 // Использует адаптивную компоновку: длинные названия (> 18 символов) занимают отдельный ряд на всю ширину экрана.
 func GetDomainsKeyboard(groupedDevices map[string][]ha.Entity) tgbotapi.InlineKeyboardMarkup {
-	domainPriority := map[string]int{
-		"light":         1,
-		"switch":        2,
-		"fan":           3,
-		"humidifier":    4,
-		"climate":       5,
-		"cover":         6,
-		"water_heater":  7,
-		"valve":         8,
-		"siren":         9,
-		"lock":          10,
-		"media_player":  11,
-		"vacuum":        12,
-		"input_boolean": 13,
-		"automation":    14,
-		"scene":         15,
-		"script":        16,
-	}
-
 	domains := make([]string, 0, len(groupedDevices))
 	for d := range groupedDevices {
 		domains = append(domains, d)
@@ -254,14 +267,8 @@ func GetDomainsKeyboard(groupedDevices map[string][]ha.Entity) tgbotapi.InlineKe
 			return c1 > 0
 		}
 
-		p1, ok1 := domainPriority[d1]
-		if !ok1 {
-			p1 = 20
-		}
-		p2, ok2 := domainPriority[d2]
-		if !ok2 {
-			p2 = 20
-		}
+		p1 := ha.GetDomainPriority(d1)
+		p2 := ha.GetDomainPriority(d2)
 
 		if p1 != p2 {
 			return p1 < p2
@@ -333,33 +340,13 @@ func GetDomainsKeyboard(groupedDevices map[string][]ha.Entity) tgbotapi.InlineKe
 
 // GetDomainDevicesKeyboard возвращает инлайн-клавиатуру устройств конкретного домена с поддержкой пагинации.
 func GetDomainDevicesKeyboard(domain string, devices []ha.Entity, page, pageSize int) tgbotapi.InlineKeyboardMarkup {
-	if pageSize <= 0 {
-		pageSize = DefaultPageSize
-	}
-
-	total := len(devices)
-	totalPages := (total + pageSize - 1) / pageSize
-	if totalPages <= 0 {
-		totalPages = 1
-	}
-	if page < 0 {
-		page = 0
-	}
-	if page >= totalPages {
-		page = totalPages - 1
-	}
-
-	start := page * pageSize
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
+	totalPages, pageClamped, start, end := paginate(len(devices), page, pageSize)
 
 	var rows [][]tgbotapi.InlineKeyboardButton
-	if start < total {
+	if start < len(devices) {
 		for _, item := range devices[start:end] {
 			btnText := FormatDeviceButton(item)
-			cbData := fmt.Sprintf("dt:%s:%d", GetEntityRef(item.EntityID), page)
+			cbData := fmt.Sprintf("dt:%s:%d", GetEntityRef(item.EntityID), pageClamped)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
@@ -368,18 +355,18 @@ func GetDomainDevicesKeyboard(domain string, devices []ha.Entity, page, pageSize
 
 	if totalPages > 1 {
 		var navRow []tgbotapi.InlineKeyboardButton
-		if page > 0 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("pd:%s:%d", domain, page-1)))
+		if pageClamped > 0 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("pd:%s:%d", domain, pageClamped-1)))
 		}
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", page+1, totalPages), "noop"))
-		if page < totalPages-1 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("pd:%s:%d", domain, page+1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", pageClamped+1, totalPages), "noop"))
+		if pageClamped < totalPages-1 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("pd:%s:%d", domain, pageClamped+1)))
 		}
 		rows = append(rows, navRow)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("dr:%s:%d", domain, page)),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("dr:%s:%d", domain, pageClamped)),
 		tgbotapi.NewInlineKeyboardButtonData("🔙 Все категории", "b_dom"),
 	))
 
@@ -428,27 +415,6 @@ func FormatConfigEntityButton(item ha.Entity) string {
 
 // GetConfigDomainsKeyboard возвращает инлайн-клавиатуру выбора категории (домена) для настройки устройств.
 func GetConfigDomainsKeyboard(groupedDevices map[string][]ha.DeviceConfigGroup) tgbotapi.InlineKeyboardMarkup {
-	domainPriority := map[string]int{
-		"light":         1,
-		"switch":        2,
-		"fan":           3,
-		"humidifier":    4,
-		"climate":       5,
-		"cover":         6,
-		"water_heater":  7,
-		"valve":         8,
-		"siren":         9,
-		"lock":          10,
-		"media_player":  11,
-		"vacuum":        12,
-		"number":        13,
-		"select":        14,
-		"input_boolean": 15,
-		"automation":    16,
-		"scene":         17,
-		"script":        18,
-	}
-
 	domains := make([]string, 0, len(groupedDevices))
 	for d := range groupedDevices {
 		domains = append(domains, d)
@@ -462,14 +428,8 @@ func GetConfigDomainsKeyboard(groupedDevices map[string][]ha.DeviceConfigGroup) 
 			return c1 > 0
 		}
 
-		p1, ok1 := domainPriority[d1]
-		if !ok1 {
-			p1 = 20
-		}
-		p2, ok2 := domainPriority[d2]
-		if !ok2 {
-			p2 = 20
-		}
+		p1 := ha.GetDomainPriority(d1)
+		p2 := ha.GetDomainPriority(d2)
 
 		if p1 != p2 {
 			return p1 < p2
@@ -538,37 +498,17 @@ func GetConfigDomainsKeyboard(groupedDevices map[string][]ha.DeviceConfigGroup) 
 
 // GetConfigDevicesKeyboard возвращает список устройств конкретного домена, имеющих конфигурацию.
 func GetConfigDevicesKeyboard(domain string, devices []ha.DeviceConfigGroup, page, pageSize int) tgbotapi.InlineKeyboardMarkup {
-	if pageSize <= 0 {
-		pageSize = DefaultPageSize
-	}
-
-	total := len(devices)
-	totalPages := (total + pageSize - 1) / pageSize
-	if totalPages <= 0 {
-		totalPages = 1
-	}
-	if page < 0 {
-		page = 0
-	}
-	if page >= totalPages {
-		page = totalPages - 1
-	}
-
-	start := page * pageSize
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
+	totalPages, pageClamped, start, end := paginate(len(devices), page, pageSize)
 
 	var rows [][]tgbotapi.InlineKeyboardButton
-	if start < total {
+	if start < len(devices) {
 		for _, item := range devices[start:end] {
 			icon, ok := DomainIcons[domain]
 			if !ok {
 				icon = "⚙️"
 			}
 			btnText := fmt.Sprintf("%s %s (%d настр.)", icon, item.DeviceName, len(item.ConfigEntities))
-			cbData := fmt.Sprintf("cds:%s:%s", GetDeviceRef(item.DeviceID), domain)
+			cbData := fmt.Sprintf("cds:%s:%s:%d", GetDeviceRef(item.DeviceID), domain, pageClamped)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
@@ -577,18 +517,18 @@ func GetConfigDevicesKeyboard(domain string, devices []ha.DeviceConfigGroup, pag
 
 	if totalPages > 1 {
 		var navRow []tgbotapi.InlineKeyboardButton
-		if page > 0 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("pdc:%s:%d", domain, page-1)))
+		if pageClamped > 0 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("pdc:%s:%d", domain, pageClamped-1)))
 		}
-		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", page+1, totalPages), "noop"))
-		if page < totalPages-1 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("pdc:%s:%d", domain, page+1)))
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", pageClamped+1, totalPages), "noop"))
+		if pageClamped < totalPages-1 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("pdc:%s:%d", domain, pageClamped+1)))
 		}
 		rows = append(rows, navRow)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("rdc:%s:%d", domain, page)),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("rdc:%s:%d", domain, pageClamped)),
 		tgbotapi.NewInlineKeyboardButtonData("🔙 Все категории", "b_cdm"),
 	))
 
@@ -596,7 +536,12 @@ func GetConfigDevicesKeyboard(domain string, devices []ha.DeviceConfigGroup, pag
 }
 
 // GetDeviceSettingsKeyboard возвращает клавиатуру со списком параметров и кнопок управления для устройства.
-func GetDeviceSettingsKeyboard(device ha.DeviceConfigGroup, domain string) tgbotapi.InlineKeyboardMarkup {
+func GetDeviceSettingsKeyboard(device ha.DeviceConfigGroup, domain string, page ...int) tgbotapi.InlineKeyboardMarkup {
+	currPage := 0
+	if len(page) > 0 && page[0] >= 0 {
+		currPage = page[0]
+	}
+
 	var rows [][]tgbotapi.InlineKeyboardButton
 
 	for _, ent := range device.ConfigEntities {
@@ -626,12 +571,26 @@ func GetDeviceSettingsKeyboard(device ha.DeviceConfigGroup, domain string) tgbot
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, "noop"),
 			))
-			// Нижняя строка с быстрыми кнопками регулировки: [-5] [-1] [+1] [+5]
+
+			// Определяем шаг регулировки (по умолчанию 1, либо из атрибутов HA)
+			step := 1.0
+			if ent.Attributes != nil {
+				if s, ok := ent.Attributes["step"].(float64); ok && s > 0 {
+					step = s
+				}
+			}
+			stepLarge := step * 5
+
+			formatStep := func(val float64) string {
+				return strconv.FormatFloat(val, 'f', -1, 64)
+			}
+
+			// Нижняя строка с кнопками регулировки: [-5*step] [-step] [+step] [+5*step]
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("➖ 5", fmt.Sprintf("cfn:%s:-5", entRef)),
-				tgbotapi.NewInlineKeyboardButtonData("➖ 1", fmt.Sprintf("cfn:%s:-1", entRef)),
-				tgbotapi.NewInlineKeyboardButtonData("➕ 1", fmt.Sprintf("cfn:%s:1", entRef)),
-				tgbotapi.NewInlineKeyboardButtonData("➕ 5", fmt.Sprintf("cfn:%s:5", entRef)),
+				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s", entRef, formatStep(-stepLarge))),
+				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(step), fmt.Sprintf("cfn:%s:%s", entRef, formatStep(-step))),
+				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(step), fmt.Sprintf("cfn:%s:%s", entRef, formatStep(step))),
+				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s", entRef, formatStep(stepLarge))),
 			))
 
 		default:
@@ -643,8 +602,8 @@ func GetDeviceSettingsKeyboard(device ha.DeviceConfigGroup, domain string) tgbot
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_cds:%s:%s", GetDeviceRef(device.DeviceID), domain)),
-		tgbotapi.NewInlineKeyboardButtonData("🔙 К устройствам", fmt.Sprintf("b_cdev:%s", domain)),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_cds:%s:%s:%d", GetDeviceRef(device.DeviceID), domain, currPage)),
+		tgbotapi.NewInlineKeyboardButtonData("🔙 К устройствам", fmt.Sprintf("b_cdev:%s:%d", domain, currPage)),
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)

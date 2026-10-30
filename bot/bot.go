@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -19,6 +20,7 @@ type Bot struct {
 	cfg      *config.Config
 	haClient *ha.Client
 	api      *tgbotapi.BotAPI
+	wg       sync.WaitGroup
 }
 
 // NewBot создает и инициализирует новый экземпляр Bot.
@@ -44,6 +46,9 @@ func NewBot(cfg *config.Config, haClient *ha.Client) (*Bot, error) {
 
 // Start запускает опрос обновлений Telegram (Long Polling) с поддержкой graceful shutdown.
 func (b *Bot) Start(ctx context.Context) {
+	// Фоновый прогрев хэш-таблицы сущностей Home Assistant для быстрых callback_data
+	go b.warmupEntityRefs()
+
 	// Отправка уведомления о запуске бота пользователю (для фиксации включения электричества)
 	b.sendStartupNotification(ctx)
 
@@ -59,14 +64,45 @@ func (b *Bot) Start(ctx context.Context) {
 		case <-ctx.Done():
 			log.Println("Останавливаем обработку обновлений бота...")
 			b.api.StopReceivingUpdates()
+			b.wg.Wait()
+			log.Println("Все обработчики бота завершены.")
 			return
 		case update, ok := <-updates:
 			if !ok {
 				log.Println("Канал обновлений Telegram закрыт.")
+				b.wg.Wait()
 				return
 			}
-			go b.safeHandleUpdate(update)
+			b.wg.Add(1)
+			go func(u tgbotapi.Update) {
+				defer b.wg.Done()
+				b.safeHandleUpdate(u)
+			}(update)
 		}
+	}
+}
+
+// resolveEntityRef восстанавливает entity_id или device_id, при необходимости подгружая реестр из HA.
+func (b *Bot) resolveEntityRef(ref string) string {
+	if !HasEntityRef(ref) {
+		b.warmupEntityRefs()
+	}
+	return ResolveEntityRef(ref)
+}
+
+// warmupEntityRefs загружает сущности из Home Assistant и заполняет хэш-таблицу.
+func (b *Bot) warmupEntityRefs() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Паника при прогреве хэшей сущностей: %v", r)
+		}
+	}()
+	if b.haClient == nil {
+		return
+	}
+	ok, entities, _ := b.haClient.GetAllEntities()
+	if ok {
+		WarmupEntityRefs(entities)
 	}
 }
 
@@ -81,7 +117,9 @@ func (b *Bot) sendStartupNotification(ctx context.Context) {
 		return
 	}
 
+	b.wg.Add(1)
 	go func() {
+		defer b.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("Паника при отправке уведомления о запуске: %v\nСтек:\n%s", r, debug.Stack())
@@ -144,6 +182,33 @@ func (b *Bot) safeHandleUpdate(update tgbotapi.Update) {
 		b.handleMessage(update.Message)
 	} else if update.CallbackQuery != nil {
 		b.handleCallbackQuery(update.CallbackQuery)
+	}
+}
+
+// sendHTML отправляет сообщение с форматированием HTML.
+func (b *Bot) sendHTML(chatID int64, text string, replyMarkup interface{}) (*tgbotapi.Message, error) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
+	if replyMarkup != nil {
+		msg.ReplyMarkup = replyMarkup
+	}
+	sent, err := b.api.Send(msg)
+	if err != nil {
+		log.Printf("Ошибка отправки HTML сообщения (chatID=%d): %v", chatID, err)
+	}
+	return &sent, err
+}
+
+// editHTML редактирует сообщение с форматированием HTML.
+func (b *Bot) editHTML(chatID int64, messageID int, text string, replyMarkup *tgbotapi.InlineKeyboardMarkup) {
+	if replyMarkup != nil {
+		edit := tgbotapi.NewEditMessageTextAndMarkup(chatID, messageID, text, *replyMarkup)
+		edit.ParseMode = tgbotapi.ModeHTML
+		b.editMessage(edit)
+	} else {
+		edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
+		edit.ParseMode = tgbotapi.ModeHTML
+		b.editMessage(edit)
 	}
 }
 

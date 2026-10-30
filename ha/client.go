@@ -12,16 +12,26 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+type registriesCache struct {
+	entities  map[string]wsEntityEntry
+	devices   map[string]string
+	expiresAt time.Time
+}
+
 // Client реализует взаимодействие с REST API и WebSocket API Home Assistant.
 type Client struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL         string
+	token           string
+	httpClient      *http.Client
+	cacheMutex      sync.RWMutex
+	registriesCache *registriesCache
+	cacheTTL        time.Duration
 }
 
 // NewClient создает новый экземпляр клиента Home Assistant API с таймаутом 5 секунд.
@@ -32,7 +42,52 @@ func NewClient(baseURL, token string) *Client {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
+		cacheTTL: 5 * time.Minute,
 	}
+}
+
+// InvalidateCache принудительно очищает кэш реестров Home Assistant.
+func (c *Client) InvalidateCache() {
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
+	c.registriesCache = nil
+}
+
+// getCachedRegistries возвращает кэшированные реестры или запрашивает их через WebSocket.
+func (c *Client) getCachedRegistries() (map[string]wsEntityEntry, map[string]string, error) {
+	c.cacheMutex.RLock()
+	if c.registriesCache != nil && time.Now().Before(c.registriesCache.expiresAt) {
+		entities := c.registriesCache.entities
+		devices := c.registriesCache.devices
+		c.cacheMutex.RUnlock()
+		return entities, devices, nil
+	}
+	c.cacheMutex.RUnlock()
+
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
+
+	// Повторная проверка под эксклюзивным локом на случай конкурентного запроса
+	if c.registriesCache != nil && time.Now().Before(c.registriesCache.expiresAt) {
+		return c.registriesCache.entities, c.registriesCache.devices, nil
+	}
+
+	entities, devices, err := c.FetchRegistriesWS()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ttl := c.cacheTTL
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	c.registriesCache = &registriesCache{
+		entities:  entities,
+		devices:   devices,
+		expiresAt: time.Now().Add(ttl),
+	}
+
+	return entities, devices, nil
 }
 
 func isTimeout(err error) bool {
@@ -157,55 +212,85 @@ func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]strin
 	}
 	defer conn.Close()
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-
 	// 1. Auth required
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, _, err = conn.ReadMessage()
 	if err != nil {
 		return nil, nil, fmt.Errorf("read auth_required: %w", err)
 	}
 
 	// 2. Send auth
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(map[string]string{"type": "auth", "access_token": c.token}); err != nil {
 		return nil, nil, fmt.Errorf("send auth: %w", err)
 	}
 
 	// 3. Read auth_ok
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, msg, err := conn.ReadMessage()
-	if err != nil || !strings.Contains(string(msg), "auth_ok") {
+	if err != nil {
+		return nil, nil, fmt.Errorf("read auth response: %w", err)
+	}
+	if !strings.Contains(string(msg), "auth_ok") {
 		return nil, nil, fmt.Errorf("auth failed: %s", string(msg))
 	}
 
 	// 4. Request entity registry list
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(map[string]interface{}{"id": 1, "type": "config/entity_registry/list"}); err != nil {
 		return nil, nil, fmt.Errorf("request entity_registry: %w", err)
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, msg1, err := conn.ReadMessage()
 	if err != nil {
 		return nil, nil, fmt.Errorf("read entity_registry: %w", err)
 	}
 
 	var entityResp struct {
-		Result []wsEntityEntry `json:"result"`
+		Success bool            `json:"success"`
+		Result  []wsEntityEntry `json:"result"`
+		Error   *struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(msg1, &entityResp); err != nil {
 		return nil, nil, fmt.Errorf("unmarshal entity_registry: %w", err)
 	}
+	if !entityResp.Success {
+		errMsg := "unknown error"
+		if entityResp.Error != nil && entityResp.Error.Message != "" {
+			errMsg = entityResp.Error.Message
+		}
+		return nil, nil, fmt.Errorf("entity_registry request failed: %s", errMsg)
+	}
 
 	// 5. Request device registry list
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(map[string]interface{}{"id": 2, "type": "config/device_registry/list"}); err != nil {
 		return nil, nil, fmt.Errorf("request device_registry: %w", err)
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, msg2, err := conn.ReadMessage()
 	if err != nil {
 		return nil, nil, fmt.Errorf("read device_registry: %w", err)
 	}
 
 	var deviceResp struct {
-		Result []wsDeviceEntry `json:"result"`
+		Success bool            `json:"success"`
+		Result  []wsDeviceEntry `json:"result"`
+		Error   *struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 	if err := json.Unmarshal(msg2, &deviceResp); err != nil {
 		return nil, nil, fmt.Errorf("unmarshal device_registry: %w", err)
+	}
+	if !deviceResp.Success {
+		errMsg := "unknown error"
+		if deviceResp.Error != nil && deviceResp.Error.Message != "" {
+			errMsg = deviceResp.Error.Message
+		}
+		return nil, nil, fmt.Errorf("device_registry request failed: %s", errMsg)
 	}
 
 	deviceMap := make(map[string]string, len(deviceResp.Result))
@@ -235,7 +320,7 @@ func (c *Client) GetAllEntities() (bool, []Entity, string) {
 		return false, nil, errMsg
 	}
 
-	entityRegistry, deviceRegistry, err := c.FetchRegistriesWS()
+	entityRegistry, deviceRegistry, err := c.getCachedRegistries()
 	if err != nil {
 		log.Printf("Предупреждение: не удалось получить реестры через WebSocket (%v), используются только состояния REST", err)
 	}
@@ -326,34 +411,9 @@ func (c *Client) GetControllableEntities() (bool, []Entity, string) {
 		controllable = append(controllable, item)
 	}
 
-	domainPriority := map[string]int{
-		"light":         1,
-		"switch":        2,
-		"fan":           3,
-		"humidifier":    4,
-		"climate":       5,
-		"cover":         6,
-		"water_heater":  7,
-		"valve":         8,
-		"siren":         9,
-		"lock":          10,
-		"media_player":  11,
-		"vacuum":        12,
-		"input_boolean": 13,
-		"automation":    14,
-		"scene":         15,
-		"script":        16,
-	}
-
 	sort.Slice(controllable, func(i, j int) bool {
-		p1, ok1 := domainPriority[controllable[i].Domain]
-		if !ok1 {
-			p1 = 20
-		}
-		p2, ok2 := domainPriority[controllable[j].Domain]
-		if !ok2 {
-			p2 = 20
-		}
+		p1 := GetDomainPriority(controllable[i].Domain)
+		p2 := GetDomainPriority(controllable[j].Domain)
 
 		if p1 != p2 {
 			return p1 < p2

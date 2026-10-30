@@ -20,6 +20,41 @@ var ControllableDomains = []string{
 	"script",
 }
 
+// DomainPriority определяет порядок отображения категорий в списках и клавиатурах.
+var DomainPriority = map[string]int{
+	"light":         1,
+	"switch":        2,
+	"fan":           3,
+	"humidifier":    4,
+	"climate":       5,
+	"cover":         6,
+	"water_heater":  7,
+	"valve":         8,
+	"siren":         9,
+	"lock":          10,
+	"media_player":  11,
+	"vacuum":        12,
+	"input_boolean": 13,
+	"automation":    14,
+	"scene":         15,
+	"script":        16,
+	"number":        17,
+	"input_number":  17,
+	"select":        18,
+	"input_select":  18,
+	"button":        19,
+	"input_button":  19,
+	"time":          20,
+}
+
+// GetDomainPriority возвращает числовой приоритет сортировки для домена (меньше - выше).
+func GetDomainPriority(domain string) int {
+	if p, ok := DomainPriority[domain]; ok {
+		return p
+	}
+	return 50
+}
+
 // Entity представляет сущность (устройство, настройку, датчик или автоматизацию) в Home Assistant.
 type Entity struct {
 	EntityID     string                 `json:"entity_id"`

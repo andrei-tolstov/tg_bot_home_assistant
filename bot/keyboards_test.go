@@ -443,4 +443,86 @@ func TestResolveEntityRef(t *testing.T) {
 	}
 }
 
+func TestWarmupEntityRefs_And_HasEntityRef(t *testing.T) {
+	longEntity := "light.corridor_main_smart_dimmable_light_switch_controller"
+	longDevice := "dev_very_long_physical_device_identifier_string_xyz"
+
+	// До прогрева HasEntityRef для неизвестных хэшей возвращает false
+	fakeHash := "h_1234abcd"
+	if HasEntityRef(fakeHash) {
+		t.Errorf("expected false for unknown hash %s", fakeHash)
+	}
+
+	// Прогреваем
+	WarmupEntityRefs([]ha.Entity{
+		{
+			EntityID: longEntity,
+			DeviceID: longDevice,
+		},
+	})
+
+	refEnt := GetEntityRef(longEntity)
+	if !HasEntityRef(refEnt) {
+		t.Errorf("expected HasEntityRef(%s) to be true after warmup", refEnt)
+	}
+	if ResolveEntityRef(refEnt) != longEntity {
+		t.Errorf("expected ResolveEntityRef to restore %s", longEntity)
+	}
+
+	refDev := GetDeviceRef(longDevice)
+	if !HasEntityRef(refDev) {
+		t.Errorf("expected HasEntityRef(%s) to be true after warmup", refDev)
+	}
+	if ResolveEntityRef(refDev) != longDevice {
+		t.Errorf("expected ResolveEntityRef to restore %s", longDevice)
+	}
+}
+
+func TestGetDeviceSettingsKeyboard_DynamicStep(t *testing.T) {
+	dev := ha.DeviceConfigGroup{
+		DeviceID:   "dev_climate_thermostat",
+		DeviceName: "Термостат",
+		Domain:     "climate",
+		ConfigEntities: []ha.Entity{
+			{
+				EntityID:     "number.thermostat_temperature_step",
+				Domain:       "number",
+				FriendlyName: "Температура",
+				State:        "21.5",
+				Category:     "config",
+				Attributes: map[string]interface{}{
+					"step": 0.5,
+				},
+			},
+		},
+	}
+
+	kb := GetDeviceSettingsKeyboard(dev, "climate", 1)
+
+	var foundMinusStep, foundMinusLarge, foundPlusStep, foundPlusLarge bool
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.Text == "➖ 2.5" {
+				foundMinusLarge = true
+			}
+			if btn.Text == "➖ 0.5" {
+				foundMinusStep = true
+			}
+			if btn.Text == "➕ 0.5" {
+				foundPlusStep = true
+			}
+			if btn.Text == "➕ 2.5" {
+				foundPlusLarge = true
+			}
+			if btn.Text == "🔙 К устройствам" && *btn.CallbackData != "b_cdev:climate:1" {
+				t.Errorf("expected back button to preserve page 1, got %s", *btn.CallbackData)
+			}
+		}
+	}
+
+	if !foundMinusLarge || !foundMinusStep || !foundPlusStep || !foundPlusLarge {
+		t.Errorf("expected dynamic step buttons [➖ 2.5, ➖ 0.5, ➕ 0.5, ➕ 2.5] not found")
+	}
+}
+
 
