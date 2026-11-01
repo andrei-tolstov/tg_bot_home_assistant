@@ -45,6 +45,21 @@ var DomainPriority = map[string]int{
 	"button":        19,
 	"input_button":  19,
 	"time":          20,
+	"sensor":        21,
+	"binary_sensor": 22,
+}
+
+// SupportedDisplayDomains содержит все домены, отображаемые в меню категорий бота.
+var SupportedDisplayDomains = append(append([]string{}, ControllableDomains...), "sensor", "binary_sensor")
+
+// IsControllableDomain проверяет, относится ли домен к управляемым устройствам.
+func IsControllableDomain(domain string) bool {
+	for _, d := range ControllableDomains {
+		if d == domain {
+			return true
+		}
+	}
+	return false
 }
 
 // GetDomainPriority возвращает числовой приоритет сортировки для домена (меньше - выше).

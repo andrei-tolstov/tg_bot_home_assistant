@@ -95,12 +95,12 @@ func TestClient_GetControllableEntities(t *testing.T) {
 		t.Fatalf("expected GetControllableEntities to succeed, got false: %s", errMsg)
 	}
 
-	// sensor should be filtered out, leaving light, switch, humidifier, automation
-	if len(entities) != 4 {
-		t.Fatalf("expected 4 controllable entities, got %d", len(entities))
+	// sensor is included as standalone device without control: light, switch, humidifier, automation, sensor
+	if len(entities) != 5 {
+		t.Fatalf("expected 5 entities, got %d", len(entities))
 	}
 
-	// Check domain priority sorting: light (1), switch (2), humidifier (4), automation (14)
+	// Check domain priority sorting: light (1), switch (2), humidifier (4), automation (14), sensor (21)
 	if entities[0].EntityID != "light.living_room" {
 		t.Errorf("expected first entity to be light.living_room, got %s", entities[0].EntityID)
 	}
@@ -112,6 +112,9 @@ func TestClient_GetControllableEntities(t *testing.T) {
 	}
 	if entities[3].EntityID != "automation.good_morning" {
 		t.Errorf("expected fourth entity to be automation.good_morning, got %s", entities[3].EntityID)
+	}
+	if entities[4].EntityID != "sensor.temperature" {
+		t.Errorf("expected fifth entity to be sensor.temperature, got %s", entities[4].EntityID)
 	}
 }
 
@@ -298,6 +301,201 @@ func TestClient_GetControllableEntities_WithCategoriesAndHidden(t *testing.T) {
 	}
 	if singleDev.DeviceName != "Выключатель гостиная" {
 		t.Errorf("expected device name 'Выключатель гостиная', got %s", singleDev.DeviceName)
+	}
+}
+
+func TestClient_GetControllableEntities_SensorDeviceDeduplication(t *testing.T) {
+	mockStates := []EntityState{
+		{
+			EntityID: "vacuum.robot",
+			State:    "docked",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Робот-пылесос",
+			},
+		},
+		{
+			EntityID: "sensor.vacuum_battery",
+			State:    "100",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Заряд батареи робота",
+				"unit_of_measurement": "%",
+			},
+		},
+		{
+			EntityID: "sensor.kitchen_temperature",
+			State:    "24.5",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Кухня ИК Пульт и датчик Temperature",
+				"unit_of_measurement": "°C",
+			},
+		},
+		{
+			EntityID: "sensor.kitchen_humidity",
+			State:    "45",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Кухня ИК Пульт и датчик Humidity",
+				"unit_of_measurement": "%",
+			},
+		},
+		{
+			EntityID: "sensor.floor_temperature",
+			State:    "26.0",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Температура пола",
+				"unit_of_measurement": "°C",
+			},
+		},
+	}
+
+	mockEntityRegistry := []wsEntityEntry{
+		{
+			EntityID:       "vacuum.robot",
+			DeviceID:       strPtr("dev_cleaner"),
+			EntityCategory: nil,
+			HiddenBy:       nil,
+		},
+		{
+			EntityID:       "sensor.vacuum_battery",
+			DeviceID:       strPtr("dev_cleaner"),
+			EntityCategory: nil,
+			HiddenBy:       nil,
+		},
+		{
+			EntityID:       "sensor.kitchen_temperature",
+			DeviceID:       strPtr("dev_tuya_sensor"),
+			EntityCategory: nil,
+			HiddenBy:       nil,
+		},
+		{
+			EntityID:       "sensor.kitchen_humidity",
+			DeviceID:       strPtr("dev_tuya_sensor"),
+			EntityCategory: nil,
+			HiddenBy:       nil,
+		},
+		{
+			EntityID:       "sensor.floor_temperature",
+			DeviceID:       nil, // standalone
+			EntityCategory: nil,
+			HiddenBy:       nil,
+		},
+	}
+
+	mockDeviceRegistry := []wsDeviceEntry{
+		{
+			ID:   "dev_cleaner",
+			Name: strPtr("Робот Dreame"),
+		},
+		{
+			ID:   "dev_tuya_sensor",
+			Name: strPtr("Кухня ИК Пульт и датчик"),
+		},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/states" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mockStates)
+			return
+		}
+		if r.URL.Path == "/api/websocket" {
+			upgrader := websocket.Upgrader{}
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			_ = conn.WriteJSON(map[string]string{"type": "auth_required"})
+			var authMsg map[string]string
+			_ = conn.ReadJSON(&authMsg)
+			_ = conn.WriteJSON(map[string]string{"type": "auth_ok"})
+
+			var req1 map[string]interface{}
+			_ = conn.ReadJSON(&req1)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req1["id"],
+				"type":    "result",
+				"success": true,
+				"result":  mockEntityRegistry,
+			})
+
+			var req2 map[string]interface{}
+			_ = conn.ReadJSON(&req2)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req2["id"],
+				"type":    "result",
+				"success": true,
+				"result":  mockDeviceRegistry,
+			})
+
+			var req3 map[string]interface{}
+			_ = conn.ReadJSON(&req3)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req3["id"],
+				"type":    "result",
+				"success": true,
+				"result":  []wsAreaEntry{},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "test_token")
+
+	ok, entities, errMsg := client.GetControllableEntities()
+	if !ok {
+		t.Fatalf("expected GetControllableEntities to succeed, got error: %s", errMsg)
+	}
+
+	// Ожидаем 4 сущности:
+	// vacuum.robot (управляемое устройство)
+	// sensor.kitchen_temperature (устройство-датчик без органов управления)
+	// sensor.kitchen_humidity (устройство-датчик без органов управления)
+	// sensor.floor_temperature (автономный датчик)
+	// sensor.vacuum_battery НЕ должен попасть, так как у dev_cleaner уже есть vacuum.robot!
+	if len(entities) != 4 {
+		t.Fatalf("expected 4 entities, got %d", len(entities))
+	}
+
+	entMap := make(map[string]bool)
+	for _, e := range entities {
+		entMap[e.EntityID] = true
+	}
+
+	if !entMap["vacuum.robot"] {
+		t.Errorf("vacuum.robot should be present")
+	}
+	if entMap["sensor.vacuum_battery"] {
+		t.Errorf("sensor.vacuum_battery should be excluded (deduplicated into vacuum device)")
+	}
+	if !entMap["sensor.kitchen_temperature"] {
+		t.Errorf("sensor.kitchen_temperature should be present")
+	}
+	if !entMap["sensor.kitchen_humidity"] {
+		t.Errorf("sensor.kitchen_humidity should be present")
+	}
+	if !entMap["sensor.floor_temperature"] {
+		t.Errorf("sensor.floor_temperature should be present")
+	}
+
+	// Проверяем GetDeviceSensors для автономного датчика
+	sensors, err := client.GetDeviceSensors("", "sensor.floor_temperature")
+	if err != nil {
+		t.Fatalf("GetDeviceSensors failed: %v", err)
+	}
+	if len(sensors) != 1 || sensors[0].EntityID != "sensor.floor_temperature" {
+		t.Errorf("expected 1 sensor for standalone floor_temperature, got %v", sensors)
+	}
+
+	// Проверяем GetDeviceSensors для устройства dev_tuya_sensor
+	tuyaSensors, err := client.GetDeviceSensors("dev_tuya_sensor", "sensor.kitchen_temperature")
+	if err != nil {
+		t.Fatalf("GetDeviceSensors for tuya failed: %v", err)
+	}
+	if len(tuyaSensors) != 2 {
+		t.Errorf("expected 2 sensors for dev_tuya_sensor, got %d", len(tuyaSensors))
 	}
 }
 

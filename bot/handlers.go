@@ -151,6 +151,10 @@ func resolveControlService(entityID, currentState string) (string, string, map[s
 
 // toggleEntity безопасно вызывает сервис переключения для указанной сущности.
 func (b *Bot) toggleEntity(entityID string) (bool, string) {
+	domain := extractDomainFromEntity(entityID)
+	if !ha.IsControllableDomain(domain) {
+		return false, "Это устройство является датчиком и не поддерживает включение/выключение."
+	}
 	stateObj, _ := b.haClient.GetEntityState(entityID)
 	currentState := ""
 	if stateObj != nil {
@@ -465,10 +469,16 @@ func (b *Bot) showDeviceMenu(cbID string, chatID int64, messageID int, entityID 
 		}
 	}
 
-	sensors, _ := b.haClient.GetDeviceSensors(targetEntity.DeviceID, targetEntity.EntityID)
+	sensors := ha.FilterDeviceSensors(allEntities, targetEntity.DeviceID, targetEntity.EntityID)
 	hasSensors := len(sensors) > 0
 
 	icon := DomainIcons[targetEntity.Domain]
+	if targetEntity.Domain == "sensor" || targetEntity.Domain == "binary_sensor" {
+		sIcon := GetSensorIcon(*targetEntity)
+		if sIcon != "" {
+			icon = sIcon
+		}
+	}
 	if icon == "" {
 		icon = "⚙️"
 	}
@@ -484,15 +494,32 @@ func (b *Bot) showDeviceMenu(cbID string, chatID int64, messageID int, entityID 
 	}
 
 	statusDisplay := targetEntity.State
-	switch targetEntity.State {
-	case "on":
-		statusDisplay = "🟢 ВКЛ"
-	case "off":
-		statusDisplay = "⚪ ВЫКЛ"
-	case "open", "unlocked":
-		statusDisplay = fmt.Sprintf("🟢 %s", strings.ToUpper(targetEntity.State))
-	case "closed", "locked":
-		statusDisplay = fmt.Sprintf("⚪ %s", strings.ToUpper(targetEntity.State))
+	if targetEntity.Domain == "sensor" {
+		unit := ""
+		if targetEntity.Attributes != nil {
+			if u, ok := targetEntity.Attributes["unit_of_measurement"].(string); ok && u != "" {
+				unit = " " + u
+			}
+		}
+		statusDisplay = FormatSensorValue(targetEntity.State) + unit
+	} else if targetEntity.Domain == "binary_sensor" {
+		valLower := strings.ToLower(targetEntity.State)
+		if valLower == "on" {
+			statusDisplay = "🔴 ВКЛ (on)"
+		} else if valLower == "off" {
+			statusDisplay = "⚪ ВЫКЛ (off)"
+		}
+	} else {
+		switch targetEntity.State {
+		case "on":
+			statusDisplay = "🟢 ВКЛ"
+		case "off":
+			statusDisplay = "⚪ ВЫКЛ"
+		case "open", "unlocked":
+			statusDisplay = fmt.Sprintf("🟢 %s", strings.ToUpper(targetEntity.State))
+		case "closed", "locked":
+			statusDisplay = fmt.Sprintf("⚪ %s", strings.ToUpper(targetEntity.State))
+		}
 	}
 
 	text := fmt.Sprintf(
@@ -537,8 +564,8 @@ func (b *Bot) showDeviceSensors(cbID string, chatID int64, messageID int, entity
 		return
 	}
 
-	sensors, err := b.haClient.GetDeviceSensors(targetEntity.DeviceID, targetEntity.EntityID)
-	if err != nil || len(sensors) == 0 {
+	sensors := ha.FilterDeviceSensors(allEntities, targetEntity.DeviceID, targetEntity.EntityID)
+	if len(sensors) == 0 {
 		if cbID != "" {
 			_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cbID, "ℹ️ У этого устройства нет датчиков"))
 		}
@@ -836,7 +863,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	}
 
 	if strings.HasPrefix(cb.Data, "rm:") {
-		areaID := strings.TrimPrefix(cb.Data, "rm:")
+		areaID := b.resolveEntityRef(strings.TrimPrefix(cb.Data, "rm:"))
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 		b.showAreaDevicesMenu(cb.ID, chatID, messageID, areaID, 0)
 		return
@@ -846,7 +873,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		b.haClient.InvalidateCache()
 		raw := strings.TrimPrefix(cb.Data, "r_rm:")
 		parts := strings.Split(raw, ":")
-		areaID := parts[0]
+		areaID := b.resolveEntityRef(parts[0])
 		page := 0
 		if len(parts) > 1 {
 			page, _ = strconv.Atoi(parts[1])
@@ -859,7 +886,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 	if strings.HasPrefix(cb.Data, "prm:") {
 		raw := strings.TrimPrefix(cb.Data, "prm:")
 		parts := strings.Split(raw, ":")
-		areaID := parts[0]
+		areaID := b.resolveEntityRef(parts[0])
 		page := 0
 		if len(parts) > 1 {
 			page, _ = strconv.Atoi(parts[1])
@@ -894,6 +921,17 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 			ref := parts[2]
 			page, _ := strconv.Atoi(parts[3])
 			entityID := b.resolveEntityRef(ref)
+
+			// Защита: датчики и неуправляемые сущности не поддерживают переключение
+			dotIdx := strings.Index(entityID, ".")
+			domain := ""
+			if dotIdx != -1 {
+				domain = entityID[:dotIdx]
+			}
+			if !ha.IsControllableDomain(domain) {
+				_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, "ℹ️ Это устройство является датчиком и не поддерживает включение/выключение."))
+				return
+			}
 
 			success, msg := b.toggleEntity(entityID)
 			if !success {
@@ -983,7 +1021,7 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		parts := strings.Split(raw, ":")
 		if len(parts) >= 3 {
 			srcType := parts[0]
-			srcID := parts[1]
+			srcID := b.resolveEntityRef(parts[1])
 			page, _ := strconv.Atoi(parts[2])
 			_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 			if srcType == "r" {

@@ -461,44 +461,58 @@ func (c *Client) GetAllEntities() (bool, []Entity, string) {
 }
 
 
-// GetControllableEntities возвращает список только управляемых сущностей (light, switch, fan, etc.)
-// Исключает сущности с категориями "config" и "diagnostic", а также скрытые сущности (is_hidden).
+// GetControllableEntities возвращает список сущностей для отображения в списках устройств и комнат.
+// Включает:
+// 1. Все управляемые сущности (light, switch, fan, etc.) без категорий "config", "diagnostic" и скрытых.
+// 2. Датчики (sensor, binary_sensor) для автономных сенсоров или физических устройств, у которых НЕТ управляющих сущностей.
+// Датчики физических устройств, имеющих управляющие сущности (например, батарея пылесоса, мощность розетки),
+// исключаются из общего списка во избежание дублирования (они доступны в меню устройства через «Показания датчиков»).
 func (c *Client) GetControllableEntities() (bool, []Entity, string) {
 	ok, allEntities, errMsg := c.GetAllEntities()
 	if !ok {
 		return false, nil, errMsg
 	}
 
-	controllableSet := make(map[string]bool, len(ControllableDomains))
-	for _, d := range ControllableDomains {
-		controllableSet[d] = true
-	}
-
-	var controllable []Entity
+	// 1. Определяем устройства, у которых есть хотя бы одна активная управляемая сущность
+	devicesWithControl := make(map[string]bool)
 	for _, item := range allEntities {
-		if !controllableSet[item.Domain] {
+		if item.Category == "config" || item.Category == "diagnostic" || item.IsHidden {
 			continue
 		}
+		if IsControllableDomain(item.Domain) && item.DeviceID != "" {
+			devicesWithControl[item.DeviceID] = true
+		}
+	}
 
+	var result []Entity
+	for _, item := range allEntities {
 		// Исключаем config, diagnostic и скрытые сущности
 		if item.Category == "config" || item.Category == "diagnostic" || item.IsHidden {
 			continue
 		}
 
-		controllable = append(controllable, item)
+		if IsControllableDomain(item.Domain) {
+			result = append(result, item)
+		} else if item.Domain == "sensor" || item.Domain == "binary_sensor" {
+			// Включаем сенсор только если у него нет DeviceID (автономный)
+			// либо если у физического устройства нет управляющих сущностей
+			if item.DeviceID == "" || !devicesWithControl[item.DeviceID] {
+				result = append(result, item)
+			}
+		}
 	}
 
-	sort.Slice(controllable, func(i, j int) bool {
-		p1 := GetDomainPriority(controllable[i].Domain)
-		p2 := GetDomainPriority(controllable[j].Domain)
+	sort.Slice(result, func(i, j int) bool {
+		p1 := GetDomainPriority(result[i].Domain)
+		p2 := GetDomainPriority(result[j].Domain)
 
 		if p1 != p2 {
 			return p1 < p2
 		}
-		return strings.ToLower(controllable[i].FriendlyName) < strings.ToLower(controllable[j].FriendlyName)
+		return strings.ToLower(result[i].FriendlyName) < strings.ToLower(result[j].FriendlyName)
 	})
 
-	return true, controllable, "Успешно"
+	return true, result, "Успешно"
 }
 
 // GetEntitiesGroupedByDomain возвращает карту {domain: [список управляемых сущностей]}.
@@ -509,8 +523,8 @@ func (c *Client) GetEntitiesGroupedByDomain() (bool, map[string][]Entity, string
 		return false, nil, errMsg
 	}
 
-	grouped := make(map[string][]Entity, len(ControllableDomains))
-	for _, domain := range ControllableDomains {
+	grouped := make(map[string][]Entity, len(SupportedDisplayDomains))
+	for _, domain := range SupportedDisplayDomains {
 		grouped[domain] = []Entity{}
 	}
 
@@ -590,17 +604,20 @@ func (c *Client) GetEntitiesForArea(areaID string) (bool, []Entity, string) {
 	return true, grouped[areaID], "Успешно"
 }
 
-// GetDeviceSensors возвращает список активных датчиков (sensor, binary_sensor) для устройства.
-func (c *Client) GetDeviceSensors(deviceID, entityID string) ([]Entity, error) {
-	ok, allEntities, errMsg := c.GetAllEntities()
-	if !ok {
-		return nil, errors.New(errMsg)
-	}
-
+// FilterDeviceSensors отбирает и сортирует активные датчики (sensor, binary_sensor) из переданного списка сущностей.
+// Если deviceID указан, возвращаются все датчики этого физического устройства.
+// Если deviceID пуст (автономный датчик), возвращается сам датчик по entityID.
+func FilterDeviceSensors(allEntities []Entity, deviceID, entityID string) []Entity {
 	var sensors []Entity
 	if deviceID != "" {
 		for _, ent := range allEntities {
 			if ent.DeviceID == deviceID && (ent.Domain == "sensor" || ent.Domain == "binary_sensor") && !ent.IsHidden {
+				sensors = append(sensors, ent)
+			}
+		}
+	} else if entityID != "" {
+		for _, ent := range allEntities {
+			if ent.EntityID == entityID && (ent.Domain == "sensor" || ent.Domain == "binary_sensor") && !ent.IsHidden {
 				sensors = append(sensors, ent)
 			}
 		}
@@ -610,7 +627,19 @@ func (c *Client) GetDeviceSensors(deviceID, entityID string) ([]Entity, error) {
 		return strings.ToLower(sensors[i].FriendlyName) < strings.ToLower(sensors[j].FriendlyName)
 	})
 
-	return sensors, nil
+	return sensors
+}
+
+// GetDeviceSensors возвращает список активных датчиков (sensor, binary_sensor) для устройства.
+// Если deviceID указан, возвращаются все датчики этого устройства.
+// Если deviceID пуст (автономный датчик), возвращается сам датчик по entityID.
+func (c *Client) GetDeviceSensors(deviceID, entityID string) ([]Entity, error) {
+	ok, allEntities, errMsg := c.GetAllEntities()
+	if !ok {
+		return nil, errors.New(errMsg)
+	}
+
+	return FilterDeviceSensors(allEntities, deviceID, entityID), nil
 }
 
 // GetConfigDevicesGroupedByDomain возвращает карту {domain: []DeviceConfigGroup}

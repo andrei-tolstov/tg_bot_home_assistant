@@ -20,9 +20,22 @@ var (
 )
 
 // GetEntityRef возвращает безопасный идентификатор для callback_data (<= 64 байт).
-// Если длина entity_id превышает 40 символов, генерируется короткий хэш.
+// Если длина entity_id превышает 28 символов, генерируется короткий хэш.
 func GetEntityRef(entityID string) string {
-	if len(entityID) <= 40 {
+	if len(entityID) <= 28 {
+		return entityID
+	}
+	hash := fmt.Sprintf("h_%08x", crc32.ChecksumIEEE([]byte(entityID)))
+	entityMapMutex.Lock()
+	entityHashMap[hash] = entityID
+	entityMapMutex.Unlock()
+	return hash
+}
+
+// GetCompactEntityRef возвращает гарантированно компактный идентификатор (<= 14 байт)
+// для составных callback_data, содержащих несколько идентификаторов одновременно.
+func GetCompactEntityRef(entityID string) string {
+	if strings.HasPrefix(entityID, "h_") || len(entityID) <= 14 {
 		return entityID
 	}
 	hash := fmt.Sprintf("h_%08x", crc32.ChecksumIEEE([]byte(entityID)))
@@ -34,7 +47,7 @@ func GetEntityRef(entityID string) string {
 
 // GetDeviceRef возвращает безопасный идентификатор устройства для callback_data.
 func GetDeviceRef(deviceID string) string {
-	if len(deviceID) <= 32 {
+	if len(deviceID) <= 24 {
 		return deviceID
 	}
 	hash := fmt.Sprintf("d_%08x", crc32.ChecksumIEEE([]byte(deviceID)))
@@ -44,9 +57,21 @@ func GetDeviceRef(deviceID string) string {
 	return hash
 }
 
-// ResolveEntityRef восстанавливает исходный ID сущности или устройства по хэшу.
+// GetAreaRef возвращает безопасный идентификатор комнаты для callback_data (<= 16 байт).
+func GetAreaRef(areaID string) string {
+	if strings.HasPrefix(areaID, "a_") || len(areaID) <= 16 {
+		return areaID
+	}
+	hash := fmt.Sprintf("a_%08x", crc32.ChecksumIEEE([]byte(areaID)))
+	entityMapMutex.Lock()
+	entityHashMap[hash] = areaID
+	entityMapMutex.Unlock()
+	return hash
+}
+
+// ResolveEntityRef восстанавливает исходный ID сущности, устройства или комнаты по хэшу.
 func ResolveEntityRef(ref string) string {
-	if strings.HasPrefix(ref, "h_") || strings.HasPrefix(ref, "d_") {
+	if strings.HasPrefix(ref, "h_") || strings.HasPrefix(ref, "d_") || strings.HasPrefix(ref, "a_") {
 		entityMapMutex.RLock()
 		defer entityMapMutex.RUnlock()
 		if full, ok := entityHashMap[ref]; ok {
@@ -58,7 +83,7 @@ func ResolveEntityRef(ref string) string {
 
 // HasEntityRef проверяет, известен ли хэш в таблице соответствия.
 func HasEntityRef(ref string) bool {
-	if !strings.HasPrefix(ref, "h_") && !strings.HasPrefix(ref, "d_") {
+	if !strings.HasPrefix(ref, "h_") && !strings.HasPrefix(ref, "d_") && !strings.HasPrefix(ref, "a_") {
 		return true
 	}
 	entityMapMutex.RLock()
@@ -67,18 +92,22 @@ func HasEntityRef(ref string) bool {
 	return ok
 }
 
-// WarmupEntityRefs заполняет таблицу хэшей для всех длинных идентификаторов сущностей и устройств.
+// WarmupEntityRefs заполняет таблицу хэшей для всех идентификаторов сущностей, устройств и комнат.
 func WarmupEntityRefs(entities []ha.Entity) {
 	entityMapMutex.Lock()
 	defer entityMapMutex.Unlock()
 	for _, ent := range entities {
-		if len(ent.EntityID) > 40 {
+		if ent.EntityID != "" {
 			hash := fmt.Sprintf("h_%08x", crc32.ChecksumIEEE([]byte(ent.EntityID)))
 			entityHashMap[hash] = ent.EntityID
 		}
-		if len(ent.DeviceID) > 32 {
+		if ent.DeviceID != "" {
 			hash := fmt.Sprintf("d_%08x", crc32.ChecksumIEEE([]byte(ent.DeviceID)))
 			entityHashMap[hash] = ent.DeviceID
+		}
+		if ent.AreaID != "" {
+			hash := fmt.Sprintf("a_%08x", crc32.ChecksumIEEE([]byte(ent.AreaID)))
+			entityHashMap[hash] = ent.AreaID
 		}
 	}
 }
@@ -135,6 +164,7 @@ var DomainIcons = map[string]string{
 	"time":          "⏱️",
 	"text":          "📝",
 	"sensor":        "📊",
+	"binary_sensor": "🔔",
 }
 
 // DomainNames содержит русскоязычные названия доменов.
@@ -162,6 +192,8 @@ var DomainNames = map[string]string{
 	"button":        "Кнопки",
 	"input_button":  "Кнопки",
 	"time":          "Таймеры и время",
+	"sensor":        "Датчики",
+	"binary_sensor": "Бинарные датчики",
 }
 
 // GetMainKeyboard возвращает постоянную клавиатуру с кнопками внизу экрана.
@@ -184,6 +216,21 @@ func GetMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
 // DefaultPageSize задает количество устройств на одной странице инлайн-клавиатуры.
 const DefaultPageSize = 10
 
+// FormatSensorValue аккуратно форматирует числовое значение датчика, убирая длинные хвосты IEEE-754 float.
+func FormatSensorValue(raw string) string {
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return raw
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) == 2 && len(parts[1]) > 2 {
+		formatted := fmt.Sprintf("%.2f", f)
+		formatted = strings.TrimRight(strings.TrimRight(formatted, "0"), ".")
+		return formatted
+	}
+	return raw
+}
+
 // FormatDeviceButton форматирует текст для кнопки устройства с иконкой и текущим состоянием.
 func FormatDeviceButton(item ha.Entity) string {
 	icon, ok := DomainIcons[item.Domain]
@@ -192,17 +239,44 @@ func FormatDeviceButton(item ha.Entity) string {
 	}
 
 	var statusBadge string
-	switch item.State {
-	case "on":
-		statusBadge = "🟢 ВКЛ"
-	case "off":
-		statusBadge = "⚪ ВЫКЛ"
-	case "open", "unlocked":
-		statusBadge = fmt.Sprintf("🟢 %s", strings.ToUpper(item.State))
-	case "closed", "locked":
-		statusBadge = fmt.Sprintf("⚪ %s", strings.ToUpper(item.State))
-	default:
-		statusBadge = fmt.Sprintf("[%s]", item.State)
+	if item.Domain == "sensor" {
+		sensorIcon := GetSensorIcon(item)
+		if sensorIcon != "" {
+			icon = sensorIcon
+		}
+		unit := ""
+		if item.Attributes != nil {
+			if u, ok := item.Attributes["unit_of_measurement"].(string); ok && u != "" {
+				unit = " " + u
+			}
+		}
+		statusBadge = FormatSensorValue(item.State) + unit
+	} else if item.Domain == "binary_sensor" {
+		sensorIcon := GetSensorIcon(item)
+		if sensorIcon != "" {
+			icon = sensorIcon
+		}
+		valLower := strings.ToLower(item.State)
+		if valLower == "on" {
+			statusBadge = "🔴 ВКЛ"
+		} else if valLower == "off" {
+			statusBadge = "⚪ ВЫКЛ"
+		} else {
+			statusBadge = fmt.Sprintf("[%s]", item.State)
+		}
+	} else {
+		switch item.State {
+		case "on":
+			statusBadge = "🟢 ВКЛ"
+		case "off":
+			statusBadge = "⚪ ВЫКЛ"
+		case "open", "unlocked":
+			statusBadge = fmt.Sprintf("🟢 %s", strings.ToUpper(item.State))
+		case "closed", "locked":
+			statusBadge = fmt.Sprintf("⚪ %s", strings.ToUpper(item.State))
+		default:
+			statusBadge = fmt.Sprintf("[%s]", item.State)
+		}
 	}
 
 	return fmt.Sprintf("%s %s: %s", icon, item.FriendlyName, statusBadge)
@@ -439,7 +513,7 @@ func GetAreasKeyboard(grouped map[string][]ha.Entity, areaNames map[string]strin
 		icon := GetAreaIcon(aID, name)
 
 		btnText := fmt.Sprintf("%s %s (%d)", icon, name, count)
-		btn := tgbotapi.NewInlineKeyboardButtonData(btnText, fmt.Sprintf("rm:%s", aID))
+		btn := tgbotapi.NewInlineKeyboardButtonData(btnText, fmt.Sprintf("rm:%s", GetAreaRef(aID)))
 		textLen := utf8.RuneCountInString(btnText)
 
 		if textLen > 18 {
@@ -472,12 +546,13 @@ func GetAreasKeyboard(grouped map[string][]ha.Entity, areaNames map[string]strin
 // Нажатие на устройство открывает контекстное меню управления этим устройством.
 func GetAreaDevicesKeyboard(areaID, areaName string, devices []ha.Entity, page, pageSize int) tgbotapi.InlineKeyboardMarkup {
 	totalPages, pageClamped, start, end := paginate(len(devices), page, pageSize)
+	areaRef := GetAreaRef(areaID)
 
 	var rows [][]tgbotapi.InlineKeyboardButton
 	if start < len(devices) {
 		for _, item := range devices[start:end] {
 			btnText := FormatDeviceButton(item)
-			cbData := fmt.Sprintf("dv_sel:r:%s:%s:%d", areaID, GetEntityRef(item.EntityID), pageClamped)
+			cbData := fmt.Sprintf("dv_sel:r:%s:%s:%d", areaRef, GetEntityRef(item.EntityID), pageClamped)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
@@ -487,17 +562,17 @@ func GetAreaDevicesKeyboard(areaID, areaName string, devices []ha.Entity, page, 
 	if totalPages > 1 {
 		var navRow []tgbotapi.InlineKeyboardButton
 		if pageClamped > 0 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("prm:%s:%d", areaID, pageClamped-1)))
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("prm:%s:%d", areaRef, pageClamped-1)))
 		}
 		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", pageClamped+1, totalPages), "noop"))
 		if pageClamped < totalPages-1 {
-			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("prm:%s:%d", areaID, pageClamped+1)))
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("prm:%s:%d", areaRef, pageClamped+1)))
 		}
 		rows = append(rows, navRow)
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_rm:%s:%d", areaID, pageClamped)),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_rm:%s:%d", areaRef, pageClamped)),
 		tgbotapi.NewInlineKeyboardButtonData("🔙 Все комнаты", "b_rms"),
 	))
 
@@ -505,36 +580,39 @@ func GetAreaDevicesKeyboard(areaID, areaName string, devices []ha.Entity, page, 
 }
 
 // GetDeviceMenuKeyboard формирует контекстное меню управления выбранным устройством с 3 кнопками:
-// 1. Вкл\Выкл
+// 1. Вкл\Выкл (только если устройство управляемое: ha.IsControllableDomain(entity.Domain))
 // 2. Конфигурация
 // 3. Показания датчиков (только если hasSensors == true)
 // а также навигационными кнопками «Обновить» и «Назад к списку».
 func GetDeviceMenuKeyboard(entity ha.Entity, hasSensors bool, srcType, srcID string, page int) tgbotapi.InlineKeyboardMarkup {
 	entRef := GetEntityRef(entity.EntityID)
+	srcRef := GetAreaRef(srcID)
 
 	var rows [][]tgbotapi.InlineKeyboardButton
 
-	// 1. Кнопка Вкл\Выкл
-	toggleText := "⚡ Вкл / Выкл"
-	switch entity.State {
-	case "on":
-		toggleText = "⚪ Выключить (ВЫКЛ)"
-	case "off":
-		toggleText = "🟢 Включить (ВКЛ)"
+	// 1. Кнопка Вкл\Выкл (только для управляемых устройств)
+	if ha.IsControllableDomain(entity.Domain) {
+		toggleText := "⚡ Вкл / Выкл"
+		switch entity.State {
+		case "on":
+			toggleText = "⚪ Выключить (ВЫКЛ)"
+		case "off":
+			toggleText = "🟢 Включить (ВКЛ)"
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(toggleText, fmt.Sprintf("d_tog:%s:%s:%s:%d", srcType, srcRef, entRef, page)),
+		))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData(toggleText, fmt.Sprintf("d_tog:%s:%s:%s:%d", srcType, srcID, entRef, page)),
-	))
 
 	// 2. Кнопка Конфигурация
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("⚙️ Конфигурация", fmt.Sprintf("d_cfg:%s:%s:%s:%d", srcType, srcID, entRef, page)),
+		tgbotapi.NewInlineKeyboardButtonData("⚙️ Конфигурация", fmt.Sprintf("d_cfg:%s:%s:%s:%d", srcType, srcRef, entRef, page)),
 	))
 
 	// 3. Кнопка Показания датчиков (отображается только если у устройства есть хотя бы один датчик)
 	if hasSensors {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📊 Показания датчиков", fmt.Sprintf("d_sen:%s:%s:%s:%d", srcType, srcID, entRef, page)),
+			tgbotapi.NewInlineKeyboardButtonData("📊 Показания датчиков", fmt.Sprintf("d_sen:%s:%s:%s:%d", srcType, srcRef, entRef, page)),
 		))
 	}
 
@@ -547,8 +625,8 @@ func GetDeviceMenuKeyboard(entity ha.Entity, hasSensors bool, srcType, srcID str
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("d_ref:%s:%s:%s:%d", srcType, srcID, entRef, page)),
-		tgbotapi.NewInlineKeyboardButtonData(backText, fmt.Sprintf("d_lst:%s:%s:%d", srcType, srcID, page)),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("d_ref:%s:%s:%s:%d", srcType, srcRef, entRef, page)),
+		tgbotapi.NewInlineKeyboardButtonData(backText, fmt.Sprintf("d_lst:%s:%s:%d", srcType, srcRef, page)),
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -556,10 +634,12 @@ func GetDeviceMenuKeyboard(entity ha.Entity, hasSensors bool, srcType, srcID str
 
 // GetDeviceSensorsKeyboard возвращает клавиатуру для экрана показаний датчиков устройства.
 func GetDeviceSensorsKeyboard(srcType, srcID, entityRef string, page int) tgbotapi.InlineKeyboardMarkup {
+	srcRef := GetAreaRef(srcID)
+	entRef := GetEntityRef(ResolveEntityRef(entityRef))
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить показания", fmt.Sprintf("d_sen_r:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
-			tgbotapi.NewInlineKeyboardButtonData("🔙 К устройству", fmt.Sprintf("d_bak:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить показания", fmt.Sprintf("d_sen_r:%s:%s:%s:%d", srcType, srcRef, entRef, page)),
+			tgbotapi.NewInlineKeyboardButtonData("🔙 К устройству", fmt.Sprintf("d_bak:%s:%s:%s:%d", srcType, srcRef, entRef, page)),
 		),
 	)
 }
@@ -567,27 +647,29 @@ func GetDeviceSensorsKeyboard(srcType, srcID, entityRef string, page int) tgbota
 // GetDeviceConfigKeyboard возвращает клавиатуру параметров устройства с возвратом в меню устройства.
 func GetDeviceConfigKeyboard(device ha.DeviceConfigGroup, srcType, srcID, entityRef string, page int) tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
+	srcRef := GetAreaRef(srcID)
+	compactDevRef := GetCompactEntityRef(ResolveEntityRef(entityRef))
 
 	for _, ent := range device.ConfigEntities {
-		entItemRef := GetEntityRef(ent.EntityID)
+		entItemRef := GetCompactEntityRef(ent.EntityID)
 		switch ent.Domain {
 		case "switch", "input_boolean", "light":
 			btnText := FormatConfigEntityButton(ent)
-			cbData := fmt.Sprintf("cft:%s:%s:%s:%s:%d", entItemRef, srcType, srcID, entityRef, page)
+			cbData := fmt.Sprintf("cft:%s:%s:%s:%s:%d", entItemRef, srcType, srcRef, compactDevRef, page)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
 
 		case "button", "input_button":
 			btnText := FormatConfigEntityButton(ent)
-			cbData := fmt.Sprintf("cfp:%s:%s:%s:%s:%d", entItemRef, srcType, srcID, entityRef, page)
+			cbData := fmt.Sprintf("cfp:%s:%s:%s:%s:%d", entItemRef, srcType, srcRef, compactDevRef, page)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
 
 		case "select", "input_select":
 			btnText := FormatConfigEntityButton(ent)
-			cbData := fmt.Sprintf("cfs:%s:%s:%s:%s:%d", entItemRef, srcType, srcID, entityRef, page)
+			cbData := fmt.Sprintf("cfs:%s:%s:%s:%s:%d", entItemRef, srcType, srcRef, compactDevRef, page)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
@@ -611,10 +693,10 @@ func GetDeviceConfigKeyboard(device ha.DeviceConfigGroup, srcType, srcID, entity
 			}
 
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(-stepLarge), srcType, srcID, entityRef, page)),
-				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(step), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(-step), srcType, srcID, entityRef, page)),
-				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(step), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(step), srcType, srcID, entityRef, page)),
-				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(stepLarge), srcType, srcID, entityRef, page)),
+				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(-stepLarge), srcType, srcRef, compactDevRef, page)),
+				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(step), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(-step), srcType, srcRef, compactDevRef, page)),
+				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(step), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(step), srcType, srcRef, compactDevRef, page)),
+				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(stepLarge), srcType, srcRef, compactDevRef, page)),
 			))
 
 		default:
@@ -626,11 +708,76 @@ func GetDeviceConfigKeyboard(device ha.DeviceConfigGroup, srcType, srcID, entity
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_cfg:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
-		tgbotapi.NewInlineKeyboardButtonData("🔙 К устройству", fmt.Sprintf("d_bak:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_cfg:%s:%s:%s:%d", srcType, srcRef, compactDevRef, page)),
+		tgbotapi.NewInlineKeyboardButtonData("🔙 К устройству", fmt.Sprintf("d_bak:%s:%s:%s:%d", srcType, srcRef, compactDevRef, page)),
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// GetSensorIcon возвращает подходящую иконку для датчика на основе имени, домена и атрибутов.
+func GetSensorIcon(sensor ha.Entity) string {
+	name := sensor.FriendlyName
+	if name == "" {
+		name = sensor.EntityID
+	}
+
+	unit := ""
+	deviceClass := ""
+	if sensor.Attributes != nil {
+		if u, ok := sensor.Attributes["unit_of_measurement"].(string); ok && u != "" {
+			unit = strings.ToLower(strings.TrimSpace(u))
+		}
+		if dc, ok := sensor.Attributes["device_class"].(string); ok && dc != "" {
+			deviceClass = strings.ToLower(strings.TrimSpace(dc))
+		}
+	}
+
+	nameLower := strings.ToLower(name)
+	isPowerUnit := unit == "w" || unit == "вт" || unit == "kw" || unit == "квт" || unit == "wh" || unit == "вт·ч" || unit == "kwh" || unit == "квт·ч" || unit == "квтч" || unit == "va" || unit == "ва"
+	isVoltageUnit := unit == "v" || unit == "в" || unit == "mv" || unit == "мв" || unit == "kv" || unit == "кв"
+	isCurrentUnit := unit == "a" || unit == "а" || unit == "ma" || unit == "ма"
+	isPressureUnit := unit == "pa" || unit == "па" || unit == "hpa" || unit == "гпа" || unit == "kpa" || unit == "кпа" || unit == "bar" || unit == "бар" || unit == "mbar" || unit == "мбар" || unit == "mmhg" || unit == "мм рт. ст." || unit == "psi"
+
+	switch {
+	case deviceClass == "temperature" || strings.Contains(unit, "°") || strings.Contains(nameLower, "температур") || strings.Contains(nameLower, "temp"):
+		return "🌡"
+	case deviceClass == "humidity" || (unit == "%" && (strings.Contains(nameLower, "влажн") || strings.Contains(nameLower, "humid"))):
+		return "💧"
+	case deviceClass == "battery" || (unit == "%" && (strings.Contains(nameLower, "батар") || strings.Contains(nameLower, "battery"))):
+		return "🔋"
+	case deviceClass == "pressure" || deviceClass == "atmospheric_pressure" || isPressureUnit || strings.Contains(nameLower, "давлен") || strings.Contains(nameLower, "pressure"):
+		return "⏲"
+	case deviceClass == "power" || deviceClass == "energy" || isPowerUnit || strings.Contains(nameLower, "мощност") || strings.Contains(nameLower, "power") || strings.Contains(nameLower, "энерг"):
+		return "⚡"
+	case deviceClass == "voltage" || isVoltageUnit || strings.Contains(nameLower, "напряжен") || strings.Contains(nameLower, "voltage"):
+		return "🔌"
+	case deviceClass == "current" || isCurrentUnit || strings.Contains(nameLower, "сила тока") || strings.Contains(nameLower, "силы тока") || strings.Contains(nameLower, "current"):
+		return "⚡"
+	case deviceClass == "illuminance" || unit == "lx" || unit == "лк" || strings.Contains(nameLower, "люкс") || strings.Contains(nameLower, "освещен") || strings.Contains(nameLower, "illuminance"):
+		return "☀️"
+	case strings.Contains(unit, "μg") || strings.Contains(unit, "мкг") || strings.Contains(unit, "pm"):
+		return "🌫"
+	case deviceClass == "signal_strength" || strings.Contains(nameLower, "сигнал") || strings.Contains(nameLower, "rssi") || strings.Contains(unit, "db") || strings.Contains(unit, "дб"):
+		return "📶"
+	case deviceClass == "door" || deviceClass == "window" || deviceClass == "opening" || strings.Contains(nameLower, "двер") || strings.Contains(nameLower, "окно") || strings.Contains(nameLower, "door") || strings.Contains(nameLower, "window"):
+		return "🚪"
+	case deviceClass == "motion" || deviceClass == "occupancy" || strings.Contains(nameLower, "движен") || strings.Contains(nameLower, "motion") || strings.Contains(nameLower, "присутств"):
+		return "🚶"
+	case deviceClass == "moisture" || strings.Contains(nameLower, "протечк") || strings.Contains(nameLower, "leak") || strings.Contains(nameLower, "moisture"):
+		return "🌊"
+	case deviceClass == "smoke" || deviceClass == "gas" || strings.Contains(nameLower, "дым") || strings.Contains(nameLower, "газ") || strings.Contains(nameLower, "smoke") || strings.Contains(nameLower, "gas"):
+		return "🚨"
+	case deviceClass == "problem" || strings.Contains(nameLower, "проблем") || strings.Contains(nameLower, "problem"):
+		return "⚠️"
+	case strings.Contains(nameLower, "бак") || strings.Contains(nameLower, "tank"):
+		return "🪣"
+	}
+
+	if sensor.Domain == "binary_sensor" {
+		return "🔔"
+	}
+	return "📊"
 }
 
 // FormatSensorDisplay форматирует строку отображения одного датчика с иконкой и значением.
@@ -640,7 +787,7 @@ func FormatSensorDisplay(sensor ha.Entity) string {
 		name = sensor.EntityID
 	}
 
-	icon := "📊"
+	icon := GetSensorIcon(sensor)
 	unit := ""
 	if sensor.Attributes != nil {
 		if u, ok := sensor.Attributes["unit_of_measurement"].(string); ok && u != "" {
@@ -649,32 +796,7 @@ func FormatSensorDisplay(sensor ha.Entity) string {
 	}
 
 	valLower := strings.ToLower(sensor.State)
-	nameLower := strings.ToLower(name)
-
-	switch {
-	case strings.Contains(unit, "°") || strings.Contains(nameLower, "температур") || strings.Contains(nameLower, "temp"):
-		icon = "🌡"
-	case strings.Contains(unit, "%") && (strings.Contains(nameLower, "влажн") || strings.Contains(nameLower, "humid")):
-		icon = "💧"
-	case strings.Contains(unit, "%") && (strings.Contains(nameLower, "батар") || strings.Contains(nameLower, "battery")):
-		icon = "🔋"
-	case strings.Contains(unit, "w") || strings.Contains(unit, "вт") || strings.Contains(nameLower, "мощност") || strings.Contains(nameLower, "power"):
-		icon = "⚡"
-	case strings.Contains(unit, "v") || strings.Contains(unit, "в") || strings.Contains(nameLower, "напряжен") || strings.Contains(nameLower, "voltage"):
-		icon = "🔌"
-	case strings.Contains(unit, "a") || strings.Contains(nameLower, "ток") || strings.Contains(nameLower, "current"):
-		icon = "⚡"
-	case strings.Contains(unit, "μg") || strings.Contains(unit, "pm"):
-		icon = "🌫"
-	case strings.Contains(nameLower, "сигнал") || strings.Contains(nameLower, "rssi") || strings.Contains(unit, "db"):
-		icon = "📶"
-	case strings.Contains(nameLower, "проблем") || strings.Contains(nameLower, "problem"):
-		icon = "⚠️"
-	case strings.Contains(nameLower, "бак") || strings.Contains(nameLower, "tank"):
-		icon = "🪣"
-	}
-
-	stateDisplay := sensor.State
+	stateDisplay := FormatSensorValue(sensor.State)
 	if sensor.Domain == "binary_sensor" {
 		if valLower == "on" {
 			stateDisplay = "🔴 ДА (on)"

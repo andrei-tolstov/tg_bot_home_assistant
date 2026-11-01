@@ -65,6 +65,60 @@ func TestFormatDeviceButton(t *testing.T) {
 			},
 			contains: []string{"💡", "Очень длинное русское название светильника", "🟢 ВКЛ"},
 		},
+		{
+			name: "temperature sensor with unit",
+			entity: ha.Entity{
+				EntityID:     "sensor.kukhnia_ik_pulk_i_datchik_temperature",
+				Domain:       "sensor",
+				FriendlyName: "Кухня ИК Пульт и датчик Temperature",
+				State:        "24.5",
+				Attributes: map[string]interface{}{
+					"unit_of_measurement": "°C",
+					"device_class":        "temperature",
+				},
+			},
+			contains: []string{"🌡", "Кухня ИК Пульт и датчик Temperature", "24.5 °C"},
+		},
+		{
+			name: "humidity sensor with unit",
+			entity: ha.Entity{
+				EntityID:     "sensor.humidity",
+				Domain:       "sensor",
+				FriendlyName: "Влажность воздуха",
+				State:        "45",
+				Attributes: map[string]interface{}{
+					"unit_of_measurement": "%",
+					"device_class":        "humidity",
+				},
+			},
+			contains: []string{"💧", "Влажность воздуха", "45 %"},
+		},
+		{
+			name: "binary sensor motion on",
+			entity: ha.Entity{
+				EntityID:     "binary_sensor.motion_sensor",
+				Domain:       "binary_sensor",
+				FriendlyName: "Датчик движения",
+				State:        "on",
+				Attributes: map[string]interface{}{
+					"device_class": "motion",
+				},
+			},
+			contains: []string{"🚶", "Датчик движения", "🔴 ВКЛ"},
+		},
+		{
+			name: "binary sensor door off",
+			entity: ha.Entity{
+				EntityID:     "binary_sensor.front_door",
+				Domain:       "binary_sensor",
+				FriendlyName: "Входная дверь",
+				State:        "off",
+				Attributes: map[string]interface{}{
+					"device_class": "door",
+				},
+			},
+			contains: []string{"🚪", "Входная дверь", "⚪ ВЫКЛ"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -714,6 +768,142 @@ func TestGetDeviceMenuKeyboard_ThreeButtons(t *testing.T) {
 			}
 		}
 	}
+
+	// 3. Для устройства-датчика (sensor): кнопка Вкл/Выкл должна быть СКРЫТА
+	sensorEntity := ha.Entity{
+		EntityID:     "sensor.kukhnia_ik_pulk_i_datchik_temperature",
+		Domain:       "sensor",
+		FriendlyName: "Кухня ИК Пульт и датчик Temperature",
+		State:        "24.5",
+	}
+	kbSensorDevice := GetDeviceMenuKeyboard(sensorEntity, true, "r", "kukhnia", 0)
+	for _, row := range kbSensorDevice.InlineKeyboard {
+		for _, btn := range row {
+			if strings.Contains(btn.Text, "Выключить") || strings.Contains(btn.Text, "Включить") || strings.Contains(btn.Text, "Вкл / Выкл") {
+				t.Errorf("unexpected Toggle button for sensor entity: %s", btn.Text)
+			}
+		}
+	}
+
+	// Проверяем наличие кнопок Конфигурация и Показания датчиков для sensorEntity
+	hasSensorConfig := false
+	hasSensorReadings := false
+	for _, row := range kbSensorDevice.InlineKeyboard {
+		for _, btn := range row {
+			if strings.Contains(btn.Text, "Конфигурация") {
+				hasSensorConfig = true
+			}
+			if strings.Contains(btn.Text, "Показания датчиков") {
+				hasSensorReadings = true
+			}
+		}
+	}
+	if !hasSensorConfig {
+		t.Errorf("expected Configuration button for sensor entity")
+	}
+	if !hasSensorReadings {
+		t.Errorf("expected Sensors button for sensor entity with hasSensors=true")
+	}
+}
+
+func TestGetSensorIcon(t *testing.T) {
+	tests := []struct {
+		name     string
+		entity   ha.Entity
+		expected string
+	}{
+		{
+			name: "temperature by unit",
+			entity: ha.Entity{
+				Domain:     "sensor",
+				Attributes: map[string]interface{}{"unit_of_measurement": "°C"},
+			},
+			expected: "🌡",
+		},
+		{
+			name: "humidity by device_class",
+			entity: ha.Entity{
+				Domain:     "sensor",
+				Attributes: map[string]interface{}{"device_class": "humidity", "unit_of_measurement": "%"},
+			},
+			expected: "💧",
+		},
+		{
+			name: "battery by name and unit",
+			entity: ha.Entity{
+				Domain:       "sensor",
+				FriendlyName: "Заряд батареи",
+				Attributes:   map[string]interface{}{"unit_of_measurement": "%"},
+			},
+			expected: "🔋",
+		},
+		{
+			name: "power by unit",
+			entity: ha.Entity{
+				Domain:     "sensor",
+				Attributes: map[string]interface{}{"unit_of_measurement": "W"},
+			},
+			expected: "⚡",
+		},
+		{
+			name: "leak by device_class",
+			entity: ha.Entity{
+				Domain:     "binary_sensor",
+				Attributes: map[string]interface{}{"device_class": "moisture"},
+			},
+			expected: "🌊",
+		},
+		{
+			name: "door by device_class",
+			entity: ha.Entity{
+				Domain:     "binary_sensor",
+				Attributes: map[string]interface{}{"device_class": "door"},
+			},
+			expected: "🚪",
+		},
+		{
+			name: "motion by device_class",
+			entity: ha.Entity{
+				Domain:     "binary_sensor",
+				Attributes: map[string]interface{}{"device_class": "motion"},
+			},
+			expected: "🚶",
+		},
+		{
+			name: "smoke by name",
+			entity: ha.Entity{
+				Domain:       "binary_sensor",
+				FriendlyName: "Датчик дыма в коридоре",
+			},
+			expected: "🚨",
+		},
+		{
+			name: "pressure hPa does not trigger current icon",
+			entity: ha.Entity{
+				Domain:       "sensor",
+				FriendlyName: "Атмосферное давление",
+				Attributes:   map[string]interface{}{"unit_of_measurement": "hPa"},
+			},
+			expected: "⏲",
+		},
+		{
+			name: "word with tok substring does not trigger current icon",
+			entity: ha.Entity{
+				Domain:       "sensor",
+				FriendlyName: "Backup Последнее автоматического копирования",
+			},
+			expected: "📊",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetSensorIcon(tt.entity)
+			if got != tt.expected {
+				t.Errorf("GetSensorIcon() = %s, expected %s", got, tt.expected)
+			}
+		})
+	}
 }
 
 func TestFormatSensorDisplay(t *testing.T) {
@@ -751,6 +941,80 @@ func TestFormatSensorDisplay(t *testing.T) {
 	outBinOff := FormatSensorDisplay(binSensorOff)
 	if !strings.Contains(outBinOff, "⚪ Нет") {
 		t.Errorf("unexpected binary sensor formatting for off: %s", outBinOff)
+	}
+}
+
+func TestFormatSensorValue(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"26.3000011444092", "26.3"},
+		{"24.5", "24.5"},
+		{"24.55", "24.55"},
+		{"100", "100"},
+		{"idle", "idle"},
+		{"0.05", "0.05"},
+		{"24.00001", "24"},
+	}
+
+	for _, tt := range tests {
+		got := FormatSensorValue(tt.input)
+		if got != tt.expected {
+			t.Errorf("FormatSensorValue(%q) = %q, expected %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestGetDeviceConfigKeyboard_CallbackDataLimits(t *testing.T) {
+	devGroup := ha.DeviceConfigGroup{
+		DeviceID:   "dev_very_long_device_id_string_1234567890",
+		DeviceName: "Терморегулятор теплого пола",
+		Domain:     "climate",
+		ConfigEntities: []ha.Entity{
+			{
+				EntityID:     "switch.living_room_thermostat_child_lock_protection",
+				Domain:       "switch",
+				FriendlyName: "Защита от детей",
+				State:        "on",
+			},
+			{
+				EntityID:     "number.living_room_thermostat_temperature_calibration_offset",
+				Domain:       "number",
+				FriendlyName: "Калибровка датчика температуры",
+				State:        "-1.5",
+				Attributes: map[string]interface{}{
+					"step": 0.5,
+				},
+			},
+			{
+				EntityID:     "select.living_room_thermostat_sensor_working_mode",
+				Domain:       "select",
+				FriendlyName: "Режим датчика",
+				State:        "floor_only",
+			},
+			{
+				EntityID:     "button.living_room_thermostat_factory_reset_action",
+				Domain:       "button",
+				FriendlyName: "Сброс настроек",
+			},
+		},
+	}
+
+	longAreaID := "komnata_otdykha_na_vtorom_etazhe_bolshaia"
+	longPrimaryEntity := "climate.living_room_floor_heating_thermostat_main"
+
+	kb := GetDeviceConfigKeyboard(devGroup, "r", longAreaID, GetEntityRef(longPrimaryEntity), 12)
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData == nil {
+				continue
+			}
+			cbData := *btn.CallbackData
+			if len([]byte(cbData)) > 64 {
+				t.Errorf("GetDeviceConfigKeyboard CallbackData %q exceeds 64 bytes limit: length is %d", cbData, len([]byte(cbData)))
+			}
+		}
 	}
 }
 

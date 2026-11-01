@@ -207,3 +207,33 @@ func TestGetAreaIcon(t *testing.T) {
 	}
 }
 
+func TestSensorControllableProtection(t *testing.T) {
+	uncontrollableEntities := []string{
+		"sensor.kukhnia_ik_pulk_i_datchik_temperature",
+		"sensor.temperatura_pola_kukhnia",
+		"binary_sensor.front_door",
+		"binary_sensor.motion",
+	}
+
+	for _, ent := range uncontrollableEntities {
+		dom := extractDomainFromEntity(ent)
+		if ha.IsControllableDomain(dom) {
+			t.Errorf("entity %s (domain %s) should not be controllable", ent, dom)
+		}
+	}
+
+	controllableEntities := []string{
+		"light.living_room",
+		"switch.socket",
+		"vacuum.cleaner",
+		"humidifier.bedroom",
+	}
+
+	for _, ent := range controllableEntities {
+		dom := extractDomainFromEntity(ent)
+		if !ha.IsControllableDomain(dom) {
+			t.Errorf("entity %s (domain %s) should be controllable", ent, dom)
+		}
+	}
+}
+
