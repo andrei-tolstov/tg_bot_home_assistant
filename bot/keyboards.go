@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"hash/crc32"
+	"html"
 	"sort"
 	"strconv"
 	"strings"
@@ -168,11 +169,10 @@ func GetMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	keyboard := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("📊 Статус HA"),
-			tgbotapi.NewKeyboardButton("💡 Все устройства"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("📁 Устройства по доменам"),
-			tgbotapi.NewKeyboardButton("⚙️ Конфигурация устройств"),
+			tgbotapi.NewKeyboardButton("🏠 Устройства по комнатам"),
 		),
 	)
 	keyboard.ResizeKeyboard = true
@@ -339,6 +339,7 @@ func GetDomainsKeyboard(groupedDevices map[string][]ha.Entity) tgbotapi.InlineKe
 }
 
 // GetDomainDevicesKeyboard возвращает инлайн-клавиатуру устройств конкретного домена с поддержкой пагинации.
+// Нажатие на устройство открывает контекстное меню управления этим устройством.
 func GetDomainDevicesKeyboard(domain string, devices []ha.Entity, page, pageSize int) tgbotapi.InlineKeyboardMarkup {
 	totalPages, pageClamped, start, end := paginate(len(devices), page, pageSize)
 
@@ -346,7 +347,7 @@ func GetDomainDevicesKeyboard(domain string, devices []ha.Entity, page, pageSize
 	if start < len(devices) {
 		for _, item := range devices[start:end] {
 			btnText := FormatDeviceButton(item)
-			cbData := fmt.Sprintf("dt:%s:%d", GetEntityRef(item.EntityID), pageClamped)
+			cbData := fmt.Sprintf("dv_sel:d:%s:%s:%d", domain, GetEntityRef(item.EntityID), pageClamped)
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
 			))
@@ -371,6 +372,320 @@ func GetDomainDevicesKeyboard(domain string, devices []ha.Entity, page, pageSize
 	))
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// GetAreaIcon возвращает эмодзи-иконку для комнаты по ее названию или идентификатору.
+func GetAreaIcon(areaID, areaName string) string {
+	combined := strings.ToLower(areaID + " " + areaName)
+	switch {
+	case strings.Contains(combined, "кухн") || strings.Contains(combined, "kukh") || strings.Contains(combined, "kitchen"):
+		return "🍳"
+	case strings.Contains(combined, "спальн") || strings.Contains(combined, "spaln") || strings.Contains(combined, "bed"):
+		return "🛏"
+	case strings.Contains(combined, "гостин") || strings.Contains(combined, "gostin") || strings.Contains(combined, "living"):
+		return "🛋"
+	case strings.Contains(combined, "детск") || strings.Contains(combined, "child") || strings.Contains(combined, "kids"):
+		return "🧸"
+	case strings.Contains(combined, "ванн") || strings.Contains(combined, "санузел") || strings.Contains(combined, "vann") || strings.Contains(combined, "bath"):
+		return "🛁"
+	case strings.Contains(combined, "коридор") || strings.Contains(combined, "прихож") || strings.Contains(combined, "koridor") || strings.Contains(combined, "hall"):
+		return "🚪"
+	case strings.Contains(combined, "кабинет") || strings.Contains(combined, "офис") || strings.Contains(combined, "office") || strings.Contains(combined, "work"):
+		return "🖥"
+	case strings.Contains(combined, "балкон") || strings.Contains(combined, "лоджи") || strings.Contains(combined, "balcon"):
+		return "🪴"
+	case strings.Contains(combined, "без комнаты") || strings.Contains(combined, "no_area"):
+		return "📦"
+	default:
+		return "🏠"
+	}
+}
+
+// GetAreasKeyboard возвращает инлайн-клавиатуру со списком комнат и количеством устройств.
+// Применяется адаптивная сетка: длинные названия (> 18 символов) занимают отдельный ряд.
+func GetAreasKeyboard(grouped map[string][]ha.Entity, areaNames map[string]string) tgbotapi.InlineKeyboardMarkup {
+	areaIDs := make([]string, 0, len(grouped))
+	for aID := range grouped {
+		if len(grouped[aID]) > 0 {
+			areaIDs = append(areaIDs, aID)
+		}
+	}
+
+	sort.Slice(areaIDs, func(i, j int) bool {
+		id1, id2 := areaIDs[i], areaIDs[j]
+		if (id1 == "no_area") != (id2 == "no_area") {
+			return id2 == "no_area"
+		}
+		name1 := areaNames[id1]
+		if name1 == "" {
+			name1 = id1
+		}
+		name2 := areaNames[id2]
+		if name2 == "" {
+			name2 = id2
+		}
+		return strings.ToLower(name1) < strings.ToLower(name2)
+	})
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	var currentRow []tgbotapi.InlineKeyboardButton
+
+	for _, aID := range areaIDs {
+		name := areaNames[aID]
+		if name == "" {
+			name = aID
+		}
+		count := len(grouped[aID])
+		icon := GetAreaIcon(aID, name)
+
+		btnText := fmt.Sprintf("%s %s (%d)", icon, name, count)
+		btn := tgbotapi.NewInlineKeyboardButtonData(btnText, fmt.Sprintf("rm:%s", aID))
+		textLen := utf8.RuneCountInString(btnText)
+
+		if textLen > 18 {
+			if len(currentRow) > 0 {
+				rows = append(rows, currentRow)
+				currentRow = []tgbotapi.InlineKeyboardButton{}
+			}
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(btn))
+		} else {
+			currentRow = append(currentRow, btn)
+			if len(currentRow) == 2 {
+				rows = append(rows, currentRow)
+				currentRow = []tgbotapi.InlineKeyboardButton{}
+			}
+		}
+	}
+
+	if len(currentRow) > 0 {
+		rows = append(rows, currentRow)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить список комнат", "r_rms"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// GetAreaDevicesKeyboard возвращает инлайн-клавиатуру устройств конкретной комнаты с поддержкой пагинации.
+// Нажатие на устройство открывает контекстное меню управления этим устройством.
+func GetAreaDevicesKeyboard(areaID, areaName string, devices []ha.Entity, page, pageSize int) tgbotapi.InlineKeyboardMarkup {
+	totalPages, pageClamped, start, end := paginate(len(devices), page, pageSize)
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	if start < len(devices) {
+		for _, item := range devices[start:end] {
+			btnText := FormatDeviceButton(item)
+			cbData := fmt.Sprintf("dv_sel:r:%s:%s:%d", areaID, GetEntityRef(item.EntityID), pageClamped)
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
+			))
+		}
+	}
+
+	if totalPages > 1 {
+		var navRow []tgbotapi.InlineKeyboardButton
+		if pageClamped > 0 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("⬅️ Назад", fmt.Sprintf("prm:%s:%d", areaID, pageClamped-1)))
+		}
+		navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", pageClamped+1, totalPages), "noop"))
+		if pageClamped < totalPages-1 {
+			navRow = append(navRow, tgbotapi.NewInlineKeyboardButtonData("Вперед ➡️", fmt.Sprintf("prm:%s:%d", areaID, pageClamped+1)))
+		}
+		rows = append(rows, navRow)
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_rm:%s:%d", areaID, pageClamped)),
+		tgbotapi.NewInlineKeyboardButtonData("🔙 Все комнаты", "b_rms"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// GetDeviceMenuKeyboard формирует контекстное меню управления выбранным устройством с 3 кнопками:
+// 1. Вкл\Выкл
+// 2. Конфигурация
+// 3. Показания датчиков (только если hasSensors == true)
+// а также навигационными кнопками «Обновить» и «Назад к списку».
+func GetDeviceMenuKeyboard(entity ha.Entity, hasSensors bool, srcType, srcID string, page int) tgbotapi.InlineKeyboardMarkup {
+	entRef := GetEntityRef(entity.EntityID)
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	// 1. Кнопка Вкл\Выкл
+	toggleText := "⚡ Вкл / Выкл"
+	switch entity.State {
+	case "on":
+		toggleText = "⚪ Выключить (ВЫКЛ)"
+	case "off":
+		toggleText = "🟢 Включить (ВКЛ)"
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(toggleText, fmt.Sprintf("d_tog:%s:%s:%s:%d", srcType, srcID, entRef, page)),
+	))
+
+	// 2. Кнопка Конфигурация
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("⚙️ Конфигурация", fmt.Sprintf("d_cfg:%s:%s:%s:%d", srcType, srcID, entRef, page)),
+	))
+
+	// 3. Кнопка Показания датчиков (отображается только если у устройства есть хотя бы один датчик)
+	if hasSensors {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📊 Показания датчиков", fmt.Sprintf("d_sen:%s:%s:%s:%d", srcType, srcID, entRef, page)),
+		))
+	}
+
+	// 4. Навигация
+	backText := "🔙 Назад к списку"
+	if srcType == "r" {
+		backText = "🔙 К списку комнаты"
+	} else if srcType == "d" {
+		backText = "🔙 К списку категории"
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("d_ref:%s:%s:%s:%d", srcType, srcID, entRef, page)),
+		tgbotapi.NewInlineKeyboardButtonData(backText, fmt.Sprintf("d_lst:%s:%s:%d", srcType, srcID, page)),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// GetDeviceSensorsKeyboard возвращает клавиатуру для экрана показаний датчиков устройства.
+func GetDeviceSensorsKeyboard(srcType, srcID, entityRef string, page int) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить показания", fmt.Sprintf("d_sen_r:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
+			tgbotapi.NewInlineKeyboardButtonData("🔙 К устройству", fmt.Sprintf("d_bak:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
+		),
+	)
+}
+
+// GetDeviceConfigKeyboard возвращает клавиатуру параметров устройства с возвратом в меню устройства.
+func GetDeviceConfigKeyboard(device ha.DeviceConfigGroup, srcType, srcID, entityRef string, page int) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	for _, ent := range device.ConfigEntities {
+		entItemRef := GetEntityRef(ent.EntityID)
+		switch ent.Domain {
+		case "switch", "input_boolean", "light":
+			btnText := FormatConfigEntityButton(ent)
+			cbData := fmt.Sprintf("cft:%s:%s:%s:%s:%d", entItemRef, srcType, srcID, entityRef, page)
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
+			))
+
+		case "button", "input_button":
+			btnText := FormatConfigEntityButton(ent)
+			cbData := fmt.Sprintf("cfp:%s:%s:%s:%s:%d", entItemRef, srcType, srcID, entityRef, page)
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
+			))
+
+		case "select", "input_select":
+			btnText := FormatConfigEntityButton(ent)
+			cbData := fmt.Sprintf("cfs:%s:%s:%s:%s:%d", entItemRef, srcType, srcID, entityRef, page)
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
+			))
+
+		case "number", "input_number":
+			btnText := FormatConfigEntityButton(ent)
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(btnText, "noop"),
+			))
+
+			step := 1.0
+			if ent.Attributes != nil {
+				if s, ok := ent.Attributes["step"].(float64); ok && s > 0 {
+					step = s
+				}
+			}
+			stepLarge := step * 5
+
+			formatStep := func(val float64) string {
+				return strconv.FormatFloat(val, 'f', -1, 64)
+			}
+
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(-stepLarge), srcType, srcID, entityRef, page)),
+				tgbotapi.NewInlineKeyboardButtonData("➖ "+formatStep(step), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(-step), srcType, srcID, entityRef, page)),
+				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(step), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(step), srcType, srcID, entityRef, page)),
+				tgbotapi.NewInlineKeyboardButtonData("➕ "+formatStep(stepLarge), fmt.Sprintf("cfn:%s:%s:%s:%s:%s:%d", entItemRef, formatStep(stepLarge), srcType, srcID, entityRef, page)),
+			))
+
+		default:
+			btnText := FormatConfigEntityButton(ent)
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(btnText, "noop"),
+			))
+		}
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Обновить", fmt.Sprintf("r_cfg:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
+		tgbotapi.NewInlineKeyboardButtonData("🔙 К устройству", fmt.Sprintf("d_bak:%s:%s:%s:%d", srcType, srcID, entityRef, page)),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// FormatSensorDisplay форматирует строку отображения одного датчика с иконкой и значением.
+func FormatSensorDisplay(sensor ha.Entity) string {
+	name := sensor.FriendlyName
+	if name == "" {
+		name = sensor.EntityID
+	}
+
+	icon := "📊"
+	unit := ""
+	if sensor.Attributes != nil {
+		if u, ok := sensor.Attributes["unit_of_measurement"].(string); ok && u != "" {
+			unit = " " + u
+		}
+	}
+
+	valLower := strings.ToLower(sensor.State)
+	nameLower := strings.ToLower(name)
+
+	switch {
+	case strings.Contains(unit, "°") || strings.Contains(nameLower, "температур") || strings.Contains(nameLower, "temp"):
+		icon = "🌡"
+	case strings.Contains(unit, "%") && (strings.Contains(nameLower, "влажн") || strings.Contains(nameLower, "humid")):
+		icon = "💧"
+	case strings.Contains(unit, "%") && (strings.Contains(nameLower, "батар") || strings.Contains(nameLower, "battery")):
+		icon = "🔋"
+	case strings.Contains(unit, "w") || strings.Contains(unit, "вт") || strings.Contains(nameLower, "мощност") || strings.Contains(nameLower, "power"):
+		icon = "⚡"
+	case strings.Contains(unit, "v") || strings.Contains(unit, "в") || strings.Contains(nameLower, "напряжен") || strings.Contains(nameLower, "voltage"):
+		icon = "🔌"
+	case strings.Contains(unit, "a") || strings.Contains(nameLower, "ток") || strings.Contains(nameLower, "current"):
+		icon = "⚡"
+	case strings.Contains(unit, "μg") || strings.Contains(unit, "pm"):
+		icon = "🌫"
+	case strings.Contains(nameLower, "сигнал") || strings.Contains(nameLower, "rssi") || strings.Contains(unit, "db"):
+		icon = "📶"
+	case strings.Contains(nameLower, "проблем") || strings.Contains(nameLower, "problem"):
+		icon = "⚠️"
+	case strings.Contains(nameLower, "бак") || strings.Contains(nameLower, "tank"):
+		icon = "🪣"
+	}
+
+	stateDisplay := sensor.State
+	if sensor.Domain == "binary_sensor" {
+		if valLower == "on" {
+			stateDisplay = "🔴 ДА (on)"
+		} else if valLower == "off" {
+			stateDisplay = "⚪ Нет (off)"
+		}
+	} else {
+		stateDisplay = stateDisplay + unit
+	}
+
+	return fmt.Sprintf("%s <b>%s:</b> <code>%s</code>", icon, html.EscapeString(name), html.EscapeString(stateDisplay))
 }
 
 // FormatConfigEntityButton форматирует текст кнопки для конфигурационной сущности с текущим состоянием.

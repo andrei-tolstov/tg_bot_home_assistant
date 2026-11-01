@@ -181,3 +181,29 @@ func TestResolveControlService(t *testing.T) {
 	}
 }
 
+func TestGetAreaIcon(t *testing.T) {
+	tests := []struct {
+		areaID   string
+		areaName string
+		expected string
+	}{
+		{"kukhnia", "Кухня", "🍳"},
+		{"spalnia", "Спальня", "🛏"},
+		{"gostinaia", "Гостиная", "🛋"},
+		{"kids_room", "Детская", "🧸"},
+		{"vannaia", "Ванная комната", "🛁"},
+		{"koridor", "Прихожая", "🚪"},
+		{"kabinet", "Рабочий кабинет", "🖥"},
+		{"balcony", "Балкон", "🪴"},
+		{"no_area", "Без комнаты", "📦"},
+		{"unknown", "Склад", "🏠"},
+	}
+
+	for _, tt := range tests {
+		icon := GetAreaIcon(tt.areaID, tt.areaName)
+		if icon != tt.expected {
+			t.Errorf("GetAreaIcon(%q, %q) = %q, expected %q", tt.areaID, tt.areaName, icon, tt.expected)
+		}
+	}
+}
+

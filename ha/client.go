@@ -18,9 +18,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// DeviceInfo содержит метаданные устройства: имя и привязку к комнате.
+type DeviceInfo struct {
+	Name   string
+	AreaID string
+}
+
 type registriesCache struct {
 	entities  map[string]wsEntityEntry
-	devices   map[string]string
+	devices   map[string]DeviceInfo
+	areas     map[string]string
 	expiresAt time.Time
 }
 
@@ -54,13 +61,14 @@ func (c *Client) InvalidateCache() {
 }
 
 // getCachedRegistries возвращает кэшированные реестры или запрашивает их через WebSocket.
-func (c *Client) getCachedRegistries() (map[string]wsEntityEntry, map[string]string, error) {
+func (c *Client) getCachedRegistries() (map[string]wsEntityEntry, map[string]DeviceInfo, map[string]string, error) {
 	c.cacheMutex.RLock()
 	if c.registriesCache != nil && time.Now().Before(c.registriesCache.expiresAt) {
 		entities := c.registriesCache.entities
 		devices := c.registriesCache.devices
+		areas := c.registriesCache.areas
 		c.cacheMutex.RUnlock()
-		return entities, devices, nil
+		return entities, devices, areas, nil
 	}
 	c.cacheMutex.RUnlock()
 
@@ -69,12 +77,12 @@ func (c *Client) getCachedRegistries() (map[string]wsEntityEntry, map[string]str
 
 	// Повторная проверка под эксклюзивным локом на случай конкурентного запроса
 	if c.registriesCache != nil && time.Now().Before(c.registriesCache.expiresAt) {
-		return c.registriesCache.entities, c.registriesCache.devices, nil
+		return c.registriesCache.entities, c.registriesCache.devices, c.registriesCache.areas, nil
 	}
 
-	entities, devices, err := c.FetchRegistriesWS()
+	entities, devices, areas, err := c.FetchRegistriesWS()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	ttl := c.cacheTTL
@@ -84,10 +92,11 @@ func (c *Client) getCachedRegistries() (map[string]wsEntityEntry, map[string]str
 	c.registriesCache = &registriesCache{
 		entities:  entities,
 		devices:   devices,
+		areas:     areas,
 		expiresAt: time.Now().Add(ttl),
 	}
 
-	return entities, devices, nil
+	return entities, devices, areas, nil
 }
 
 func isTimeout(err error) bool {
@@ -181,9 +190,9 @@ func (c *Client) GetAllStates() (bool, []EntityState, string) {
 }
 
 type wsEntityEntry struct {
-
 	EntityID       string  `json:"entity_id"`
 	DeviceID       *string `json:"device_id"`
+	AreaID         *string `json:"area_id"`
 	EntityCategory *string `json:"entity_category"`
 	HiddenBy       *string `json:"hidden_by"`
 	DisabledBy     *string `json:"disabled_by"`
@@ -195,10 +204,16 @@ type wsDeviceEntry struct {
 	ID         string  `json:"id"`
 	Name       *string `json:"name"`
 	NameByUser *string `json:"name_by_user"`
+	AreaID     *string `json:"area_id"`
 }
 
-// FetchRegistriesWS получает реестры сущностей и устройств через WebSocket API Home Assistant.
-func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]string, error) {
+type wsAreaEntry struct {
+	AreaID string `json:"area_id"`
+	Name   string `json:"name"`
+}
+
+// FetchRegistriesWS получает реестры сущностей, устройств и комнат через WebSocket API Home Assistant.
+func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]DeviceInfo, map[string]string, error) {
 	wsURL := strings.Replace(c.baseURL, "https://", "wss://", 1)
 	wsURL = strings.Replace(wsURL, "http://", "ws://", 1)
 	wsURL = strings.TrimRight(wsURL, "/") + "/api/websocket"
@@ -208,7 +223,7 @@ func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]strin
 	}
 	conn, _, err := dialer.Dial(wsURL, http.Header{})
 	if err != nil {
-		return nil, nil, fmt.Errorf("ws dial: %w", err)
+		return nil, nil, nil, fmt.Errorf("ws dial: %w", err)
 	}
 	defer conn.Close()
 
@@ -216,34 +231,34 @@ func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]strin
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, _, err = conn.ReadMessage()
 	if err != nil {
-		return nil, nil, fmt.Errorf("read auth_required: %w", err)
+		return nil, nil, nil, fmt.Errorf("read auth_required: %w", err)
 	}
 
 	// 2. Send auth
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(map[string]string{"type": "auth", "access_token": c.token}); err != nil {
-		return nil, nil, fmt.Errorf("send auth: %w", err)
+		return nil, nil, nil, fmt.Errorf("send auth: %w", err)
 	}
 
 	// 3. Read auth_ok
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		return nil, nil, fmt.Errorf("read auth response: %w", err)
+		return nil, nil, nil, fmt.Errorf("read auth response: %w", err)
 	}
 	if !strings.Contains(string(msg), "auth_ok") {
-		return nil, nil, fmt.Errorf("auth failed: %s", string(msg))
+		return nil, nil, nil, fmt.Errorf("auth failed: %s", string(msg))
 	}
 
 	// 4. Request entity registry list
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(map[string]interface{}{"id": 1, "type": "config/entity_registry/list"}); err != nil {
-		return nil, nil, fmt.Errorf("request entity_registry: %w", err)
+		return nil, nil, nil, fmt.Errorf("request entity_registry: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, msg1, err := conn.ReadMessage()
 	if err != nil {
-		return nil, nil, fmt.Errorf("read entity_registry: %w", err)
+		return nil, nil, nil, fmt.Errorf("read entity_registry: %w", err)
 	}
 
 	var entityResp struct {
@@ -254,25 +269,25 @@ func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]strin
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(msg1, &entityResp); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal entity_registry: %w", err)
+		return nil, nil, nil, fmt.Errorf("unmarshal entity_registry: %w", err)
 	}
 	if !entityResp.Success {
 		errMsg := "unknown error"
 		if entityResp.Error != nil && entityResp.Error.Message != "" {
 			errMsg = entityResp.Error.Message
 		}
-		return nil, nil, fmt.Errorf("entity_registry request failed: %s", errMsg)
+		return nil, nil, nil, fmt.Errorf("entity_registry request failed: %s", errMsg)
 	}
 
 	// 5. Request device registry list
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.WriteJSON(map[string]interface{}{"id": 2, "type": "config/device_registry/list"}); err != nil {
-		return nil, nil, fmt.Errorf("request device_registry: %w", err)
+		return nil, nil, nil, fmt.Errorf("request device_registry: %w", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, msg2, err := conn.ReadMessage()
 	if err != nil {
-		return nil, nil, fmt.Errorf("read device_registry: %w", err)
+		return nil, nil, nil, fmt.Errorf("read device_registry: %w", err)
 	}
 
 	var deviceResp struct {
@@ -283,17 +298,46 @@ func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]strin
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(msg2, &deviceResp); err != nil {
-		return nil, nil, fmt.Errorf("unmarshal device_registry: %w", err)
+		return nil, nil, nil, fmt.Errorf("unmarshal device_registry: %w", err)
 	}
 	if !deviceResp.Success {
 		errMsg := "unknown error"
 		if deviceResp.Error != nil && deviceResp.Error.Message != "" {
 			errMsg = deviceResp.Error.Message
 		}
-		return nil, nil, fmt.Errorf("device_registry request failed: %s", errMsg)
+		return nil, nil, nil, fmt.Errorf("device_registry request failed: %s", errMsg)
 	}
 
-	deviceMap := make(map[string]string, len(deviceResp.Result))
+	// 6. Request area registry list
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if err := conn.WriteJSON(map[string]interface{}{"id": 3, "type": "config/area_registry/list"}); err != nil {
+		return nil, nil, nil, fmt.Errorf("request area_registry: %w", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, msg3, err := conn.ReadMessage()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("read area_registry: %w", err)
+	}
+
+	var areaResp struct {
+		Success bool          `json:"success"`
+		Result  []wsAreaEntry `json:"result"`
+		Error   *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(msg3, &areaResp); err != nil {
+		return nil, nil, nil, fmt.Errorf("unmarshal area_registry: %w", err)
+	}
+	if !areaResp.Success {
+		errMsg := "unknown error"
+		if areaResp.Error != nil && areaResp.Error.Message != "" {
+			errMsg = areaResp.Error.Message
+		}
+		return nil, nil, nil, fmt.Errorf("area_registry request failed: %s", errMsg)
+	}
+
+	deviceMap := make(map[string]DeviceInfo, len(deviceResp.Result))
 	for _, d := range deviceResp.Result {
 		name := ""
 		if d.NameByUser != nil && *d.NameByUser != "" {
@@ -301,7 +345,14 @@ func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]strin
 		} else if d.Name != nil && *d.Name != "" {
 			name = *d.Name
 		}
-		deviceMap[d.ID] = name
+		areaID := ""
+		if d.AreaID != nil {
+			areaID = *d.AreaID
+		}
+		deviceMap[d.ID] = DeviceInfo{
+			Name:   name,
+			AreaID: areaID,
+		}
 	}
 
 	entityMap := make(map[string]wsEntityEntry, len(entityResp.Result))
@@ -309,7 +360,12 @@ func (c *Client) FetchRegistriesWS() (map[string]wsEntityEntry, map[string]strin
 		entityMap[e.EntityID] = e
 	}
 
-	return entityMap, deviceMap, nil
+	areaMap := make(map[string]string, len(areaResp.Result))
+	for _, a := range areaResp.Result {
+		areaMap[a.AreaID] = a.Name
+	}
+
+	return entityMap, deviceMap, areaMap, nil
 }
 
 // GetAllEntities получает список всех сущностей с метаданными категорий и устройств.
@@ -320,7 +376,7 @@ func (c *Client) GetAllEntities() (bool, []Entity, string) {
 		return false, nil, errMsg
 	}
 
-	entityRegistry, deviceRegistry, err := c.getCachedRegistries()
+	entityRegistry, deviceRegistry, areaRegistry, err := c.getCachedRegistries()
 	if err != nil {
 		log.Printf("Предупреждение: не удалось получить реестры через WebSocket (%v), используются только состояния REST", err)
 	}
@@ -349,6 +405,8 @@ func (c *Client) GetAllEntities() (bool, []Entity, string) {
 		isHidden := false
 		deviceID := ""
 		deviceName := ""
+		areaID := ""
+		areaName := ""
 
 		if entityRegistry != nil {
 			if regEntry, exists := entityRegistry[item.EntityID]; exists {
@@ -358,13 +416,30 @@ func (c *Client) GetAllEntities() (bool, []Entity, string) {
 				if regEntry.HiddenBy != nil || regEntry.DisabledBy != nil {
 					isHidden = true
 				}
+				if regEntry.AreaID != nil && *regEntry.AreaID != "" {
+					areaID = *regEntry.AreaID
+				}
 				if regEntry.DeviceID != nil && *regEntry.DeviceID != "" {
 					deviceID = *regEntry.DeviceID
 					if deviceRegistry != nil {
-						deviceName = deviceRegistry[deviceID]
+						if devInfo, devExists := deviceRegistry[deviceID]; devExists {
+							deviceName = devInfo.Name
+							if areaID == "" {
+								areaID = devInfo.AreaID
+							}
+						}
 					}
 				}
 			}
+		}
+
+		if areaID != "" && areaRegistry != nil {
+			if aName, aExists := areaRegistry[areaID]; aExists {
+				areaName = aName
+			}
+		}
+		if areaName == "" && areaID != "" {
+			areaName = areaID
 		}
 
 		entities = append(entities, Entity{
@@ -376,6 +451,8 @@ func (c *Client) GetAllEntities() (bool, []Entity, string) {
 			IsHidden:     isHidden,
 			DeviceID:     deviceID,
 			DeviceName:   deviceName,
+			AreaID:       areaID,
+			AreaName:     areaName,
 			Attributes:   item.Attributes,
 		})
 	}
@@ -451,6 +528,89 @@ func (c *Client) GetEntitiesForDomain(domain string) (bool, []Entity, string) {
 		return false, nil, errMsg
 	}
 	return true, grouped[domain], "Успешно"
+}
+
+// GetEntitiesGroupedByArea возвращает сгруппированные по комнатам управляемые сущности и карту названий комнат.
+// Исключает config/diagnostic/hidden.
+func (c *Client) GetEntitiesGroupedByArea() (bool, map[string][]Entity, map[string]string, string) {
+	ok, entities, errMsg := c.GetControllableEntities()
+	if !ok {
+		return false, nil, nil, errMsg
+	}
+
+	_, _, areaRegistry, _ := c.getCachedRegistries()
+
+	grouped := make(map[string][]Entity)
+	areaNames := make(map[string]string)
+
+	if areaRegistry != nil {
+		for aID, aName := range areaRegistry {
+			areaNames[aID] = aName
+			grouped[aID] = []Entity{}
+		}
+	}
+
+	for _, entity := range entities {
+		aID := entity.AreaID
+		if aID == "" {
+			aID = "no_area"
+		}
+		if aID == "no_area" {
+			areaNames["no_area"] = "Без комнаты"
+		} else if _, exists := areaNames[aID]; !exists {
+			if entity.AreaName != "" {
+				areaNames[aID] = entity.AreaName
+			} else {
+				areaNames[aID] = aID
+			}
+		}
+		grouped[aID] = append(grouped[aID], entity)
+	}
+
+	for aID := range grouped {
+		sort.Slice(grouped[aID], func(i, j int) bool {
+			p1 := GetDomainPriority(grouped[aID][i].Domain)
+			p2 := GetDomainPriority(grouped[aID][j].Domain)
+			if p1 != p2 {
+				return p1 < p2
+			}
+			return strings.ToLower(grouped[aID][i].FriendlyName) < strings.ToLower(grouped[aID][j].FriendlyName)
+		})
+	}
+
+	return true, grouped, areaNames, "Успешно"
+}
+
+// GetEntitiesForArea возвращает список управляемых сущностей для указанной комнаты.
+func (c *Client) GetEntitiesForArea(areaID string) (bool, []Entity, string) {
+	ok, grouped, _, errMsg := c.GetEntitiesGroupedByArea()
+	if !ok {
+		return false, nil, errMsg
+	}
+	return true, grouped[areaID], "Успешно"
+}
+
+// GetDeviceSensors возвращает список активных датчиков (sensor, binary_sensor) для устройства.
+func (c *Client) GetDeviceSensors(deviceID, entityID string) ([]Entity, error) {
+	ok, allEntities, errMsg := c.GetAllEntities()
+	if !ok {
+		return nil, errors.New(errMsg)
+	}
+
+	var sensors []Entity
+	if deviceID != "" {
+		for _, ent := range allEntities {
+			if ent.DeviceID == deviceID && (ent.Domain == "sensor" || ent.Domain == "binary_sensor") && !ent.IsHidden {
+				sensors = append(sensors, ent)
+			}
+		}
+	}
+
+	sort.Slice(sensors, func(i, j int) bool {
+		return strings.ToLower(sensors[i].FriendlyName) < strings.ToLower(sensors[j].FriendlyName)
+	})
+
+	return sensors, nil
 }
 
 // GetConfigDevicesGroupedByDomain возвращает карту {domain: []DeviceConfigGroup}

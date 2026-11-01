@@ -240,6 +240,15 @@ func TestClient_GetControllableEntities_WithCategoriesAndHidden(t *testing.T) {
 				"success": true,
 				"result":  mockDeviceRegistry,
 			})
+
+			var req3 map[string]interface{}
+			_ = conn.ReadJSON(&req3)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req3["id"],
+				"type":    "result",
+				"success": true,
+				"result":  []wsAreaEntry{},
+			})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -376,6 +385,14 @@ func TestClient_WebSocket_CacheAndInvalidate(t *testing.T) {
 				"success": true,
 				"result":  []wsDeviceEntry{},
 			})
+			var req3 map[string]interface{}
+			_ = conn.ReadJSON(&req3)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req3["id"],
+				"type":    "result",
+				"success": true,
+				"result":  []wsAreaEntry{},
+			})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -436,12 +453,201 @@ func TestClient_WebSocket_AuthFailed(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "wrong_token")
-	_, _, err := client.FetchRegistriesWS()
+	_, _, _, err := client.FetchRegistriesWS()
 	if err == nil {
 		t.Fatal("expected error for failed auth, got nil")
 	}
 	if !strings.Contains(err.Error(), "auth failed") {
 		t.Errorf("expected error to contain 'auth failed', got %v", err)
+	}
+}
+
+func TestClient_AreasAndSensors(t *testing.T) {
+	mockStates := []EntityState{
+		{
+			EntityID: "light.kitchen",
+			State:    "on",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Кухня Свет",
+			},
+		},
+		{
+			EntityID: "switch.bedroom_relay",
+			State:    "off",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Спальня Реле",
+			},
+		},
+		{
+			EntityID: "automation.auto_clean",
+			State:    "on",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Автоуборка",
+			},
+		},
+		{
+			EntityID: "sensor.kitchen_temperature",
+			State:    "24.1",
+			Attributes: map[string]interface{}{
+				"friendly_name":       "Температура кухни",
+				"unit_of_measurement": "°C",
+			},
+		},
+		{
+			EntityID: "binary_sensor.kitchen_door",
+			State:    "off",
+			Attributes: map[string]interface{}{
+				"friendly_name": "Дверь кухни",
+			},
+		},
+	}
+
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/states" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mockStates)
+			return
+		}
+		if r.URL.Path == "/api/websocket" {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+
+			_ = conn.WriteJSON(map[string]string{"type": "auth_required"})
+			var authMsg map[string]string
+			_ = conn.ReadJSON(&authMsg)
+			_ = conn.WriteJSON(map[string]string{"type": "auth_ok"})
+
+			// entities
+			var req1 map[string]interface{}
+			_ = conn.ReadJSON(&req1)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req1["id"],
+				"type":    "result",
+				"success": true,
+				"result": []wsEntityEntry{
+					{
+						EntityID: "light.kitchen",
+						DeviceID: strPtr("dev_kitchen"),
+						AreaID:   strPtr("area_kitchen"),
+					},
+					{
+						EntityID: "sensor.kitchen_temperature",
+						DeviceID: strPtr("dev_kitchen"),
+					},
+					{
+						EntityID: "binary_sensor.kitchen_door",
+						DeviceID: strPtr("dev_kitchen"),
+					},
+					{
+						EntityID: "switch.bedroom_relay",
+						DeviceID: strPtr("dev_bedroom"),
+					},
+				},
+			})
+
+			// devices
+			var req2 map[string]interface{}
+			_ = conn.ReadJSON(&req2)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req2["id"],
+				"type":    "result",
+				"success": true,
+				"result": []wsDeviceEntry{
+					{
+						ID:     "dev_kitchen",
+						Name:   strPtr("Кухонный Модуль"),
+						AreaID: strPtr("area_kitchen"),
+					},
+					{
+						ID:     "dev_bedroom",
+						Name:   strPtr("Реле Спальни"),
+						AreaID: strPtr("area_bedroom"),
+					},
+				},
+			})
+
+			// areas
+			var req3 map[string]interface{}
+			_ = conn.ReadJSON(&req3)
+			_ = conn.WriteJSON(map[string]interface{}{
+				"id":      req3["id"],
+				"type":    "result",
+				"success": true,
+				"result": []wsAreaEntry{
+					{
+						AreaID: "area_kitchen",
+						Name:   "Кухня",
+					},
+					{
+						AreaID: "area_bedroom",
+						Name:   "Спальня",
+					},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token")
+
+	// 1. Grouped by area
+	ok, grouped, names, errMsg := client.GetEntitiesGroupedByArea()
+	if !ok {
+		t.Fatalf("expected GetEntitiesGroupedByArea to succeed: %s", errMsg)
+	}
+
+	if names["area_kitchen"] != "Кухня" {
+		t.Errorf("expected area_kitchen to be Кухня, got %s", names["area_kitchen"])
+	}
+	if names["area_bedroom"] != "Спальня" {
+		t.Errorf("expected area_bedroom to be Спальня, got %s", names["area_bedroom"])
+	}
+	if names["no_area"] != "Без комнаты" {
+		t.Errorf("expected no_area to be Без комнаты, got %s", names["no_area"])
+	}
+
+	if len(grouped["area_kitchen"]) != 1 || grouped["area_kitchen"][0].EntityID != "light.kitchen" {
+		t.Errorf("unexpected kitchen entities: %+v", grouped["area_kitchen"])
+	}
+	if len(grouped["area_bedroom"]) != 1 || grouped["area_bedroom"][0].EntityID != "switch.bedroom_relay" {
+		t.Errorf("unexpected bedroom entities: %+v", grouped["area_bedroom"])
+	}
+	if len(grouped["no_area"]) != 1 || grouped["no_area"][0].EntityID != "automation.auto_clean" {
+		t.Errorf("unexpected no_area entities: %+v", grouped["no_area"])
+	}
+
+	// 2. Specific area
+	ok, kitchenEntities, _ := client.GetEntitiesForArea("area_kitchen")
+	if !ok || len(kitchenEntities) != 1 {
+		t.Fatalf("expected 1 entity for area_kitchen, got %d", len(kitchenEntities))
+	}
+
+	// 3. Sensors for dev_kitchen
+	sensors, err := client.GetDeviceSensors("dev_kitchen", "light.kitchen")
+	if err != nil {
+		t.Fatalf("unexpected error getting sensors: %v", err)
+	}
+	if len(sensors) != 2 {
+		t.Fatalf("expected 2 sensors for dev_kitchen, got %d", len(sensors))
+	}
+	// Sorted: binary_sensor.kitchen_door (Дверь кухни) < sensor.kitchen_temperature (Температура кухни)
+	if sensors[0].EntityID != "binary_sensor.kitchen_door" {
+		t.Errorf("expected first sensor binary_sensor.kitchen_door, got %s", sensors[0].EntityID)
+	}
+	if sensors[1].EntityID != "sensor.kitchen_temperature" {
+		t.Errorf("expected second sensor sensor.kitchen_temperature, got %s", sensors[1].EntityID)
+	}
+
+	// Sensors for entity without device
+	noSensors, err := client.GetDeviceSensors("", "automation.auto_clean")
+	if err != nil || len(noSensors) != 0 {
+		t.Fatalf("expected 0 sensors for automation, got %d (err: %v)", len(noSensors), err)
 	}
 }
 

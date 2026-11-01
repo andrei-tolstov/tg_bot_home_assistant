@@ -525,4 +525,233 @@ func TestGetDeviceSettingsKeyboard_DynamicStep(t *testing.T) {
 	}
 }
 
+func TestGetMainKeyboard_Buttons(t *testing.T) {
+	kb := GetMainKeyboard()
+
+	var allButtons []string
+	for _, row := range kb.Keyboard {
+		for _, btn := range row {
+			allButtons = append(allButtons, btn.Text)
+		}
+	}
+
+	for _, text := range allButtons {
+		if strings.Contains(text, "Все устройства") {
+			t.Errorf("unexpected 'Все устройства' button in main keyboard")
+		}
+		if strings.Contains(text, "Конфигурация устройств") {
+			t.Errorf("unexpected 'Конфигурация устройств' button in main keyboard")
+		}
+	}
+
+	foundRooms := false
+	foundDomains := false
+	foundStatus := false
+	for _, text := range allButtons {
+		if strings.Contains(text, "Устройства по комнатам") {
+			foundRooms = true
+		}
+		if strings.Contains(text, "Устройства по доменам") {
+			foundDomains = true
+		}
+		if strings.Contains(text, "Статус HA") {
+			foundStatus = true
+		}
+	}
+
+	if !foundRooms {
+		t.Errorf("expected 'Устройства по комнатам' button in main keyboard")
+	}
+	if !foundDomains {
+		t.Errorf("expected 'Устройства по доменам' button in main keyboard")
+	}
+	if !foundStatus {
+		t.Errorf("expected 'Статус HA' button in main keyboard")
+	}
+}
+
+func TestGetAreasKeyboard_AdaptiveLayoutAndEmpty(t *testing.T) {
+	grouped := map[string][]ha.Entity{
+		"kukhnia": {
+			{EntityID: "light.kukhnia", Domain: "light", FriendlyName: "Свет"},
+		},
+		"spalnia": {
+			{EntityID: "light.spalnia", Domain: "light", FriendlyName: "Свет"},
+		},
+		"pustaia_komnata": {}, // 0 устройств, должна скрываться
+		"no_area": {
+			{EntityID: "automation.test", Domain: "automation", FriendlyName: "Автоматизация"},
+		},
+	}
+	areaNames := map[string]string{
+		"kukhnia":         "Кухня",
+		"spalnia":         "Очень длинное название комнаты для теста",
+		"pustaia_komnata": "Пустая комната",
+		"no_area":         "Без комнаты",
+	}
+
+	kb := GetAreasKeyboard(grouped, areaNames)
+
+	var foundEmpty bool
+	var buttons []string
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			buttons = append(buttons, btn.Text)
+			if strings.Contains(btn.Text, "Пустая комната") {
+				foundEmpty = true
+			}
+			if btn.CallbackData != nil && len([]byte(*btn.CallbackData)) > 64 {
+				t.Errorf("CallbackData %q exceeds 64 bytes", *btn.CallbackData)
+			}
+		}
+	}
+
+	if foundEmpty {
+		t.Errorf("empty area should be hidden from areas keyboard")
+	}
+
+	// no_area должен быть последней комнатой
+	if len(buttons) >= 2 {
+		lastAreaBtn := buttons[len(buttons)-2] // перед кнопкой обновления
+		if !strings.Contains(lastAreaBtn, "Без комнаты") {
+			t.Errorf("expected 'Без комнаты' to be the last room, got %s", lastAreaBtn)
+		}
+	}
+}
+
+func TestGetAreaDevicesKeyboard_PaginationAndSelection(t *testing.T) {
+	var devices []ha.Entity
+	for i := 0; i < 15; i++ {
+		devices = append(devices, ha.Entity{
+			EntityID:     fmt.Sprintf("light.lamp_%d", i),
+			Domain:       "light",
+			FriendlyName: fmt.Sprintf("Лампа %d", i),
+			State:        "on",
+		})
+	}
+
+	kb := GetAreaDevicesKeyboard("kukhnia", "Кухня", devices, 0, 10)
+
+	// Проверяем формат callback_data для первого устройства
+	firstBtn := kb.InlineKeyboard[0][0]
+	if !strings.HasPrefix(*firstBtn.CallbackData, "dv_sel:r:kukhnia:") {
+		t.Errorf("expected dv_sel:r:kukhnia:... callback prefix, got %s", *firstBtn.CallbackData)
+	}
+
+	// Проверяем ограничение 64 байт
+	for _, row := range kb.InlineKeyboard {
+		for _, btn := range row {
+			if btn.CallbackData != nil && len([]byte(*btn.CallbackData)) > 64 {
+				t.Errorf("CallbackData %q exceeds 64 bytes", *btn.CallbackData)
+			}
+		}
+	}
+}
+
+func TestGetDomainDevicesKeyboard_SelectionCallback(t *testing.T) {
+	devices := []ha.Entity{
+		{
+			EntityID:     "switch.relay_1",
+			Domain:       "switch",
+			FriendlyName: "Реле 1",
+			State:        "off",
+		},
+	}
+
+	kb := GetDomainDevicesKeyboard("switch", devices, 0, 10)
+	firstBtn := kb.InlineKeyboard[0][0]
+	if !strings.HasPrefix(*firstBtn.CallbackData, "dv_sel:d:switch:") {
+		t.Errorf("expected dv_sel:d:switch:... callback prefix, got %s", *firstBtn.CallbackData)
+	}
+}
+
+func TestGetDeviceMenuKeyboard_ThreeButtons(t *testing.T) {
+	entity := ha.Entity{
+		EntityID:     "humidifier.kukhnia_osushitel",
+		Domain:       "humidifier",
+		FriendlyName: "Осушитель",
+		State:        "on",
+	}
+
+	// 1. С датчиками (hasSensors = true)
+	kbWithSensors := GetDeviceMenuKeyboard(entity, true, "r", "kukhnia", 0)
+
+	var textsWith []string
+	for _, row := range kbWithSensors.InlineKeyboard {
+		for _, btn := range row {
+			textsWith = append(textsWith, btn.Text)
+			if btn.CallbackData != nil && len([]byte(*btn.CallbackData)) > 64 {
+				t.Errorf("CallbackData %q exceeds 64 bytes", *btn.CallbackData)
+			}
+		}
+	}
+
+	hasToggle := false
+	hasConfig := false
+	hasSensorsBtn := false
+	for _, txt := range textsWith {
+		if strings.Contains(txt, "Выключить") || strings.Contains(txt, "Вкл / Выкл") {
+			hasToggle = true
+		}
+		if strings.Contains(txt, "Конфигурация") {
+			hasConfig = true
+		}
+		if strings.Contains(txt, "Показания датчиков") {
+			hasSensorsBtn = true
+		}
+	}
+
+	if !hasToggle || !hasConfig || !hasSensorsBtn {
+		t.Errorf("expected 3 buttons (Toggle, Config, Sensors), got: %v", textsWith)
+	}
+
+	// 2. Без датчиков (hasSensors = false)
+	kbNoSensors := GetDeviceMenuKeyboard(entity, false, "r", "kukhnia", 0)
+	for _, row := range kbNoSensors.InlineKeyboard {
+		for _, btn := range row {
+			if strings.Contains(btn.Text, "Показания датчиков") {
+				t.Errorf("unexpected Sensors button when hasSensors is false")
+			}
+		}
+	}
+}
+
+func TestFormatSensorDisplay(t *testing.T) {
+	tempSensor := ha.Entity{
+		EntityID:     "sensor.living_room_temperature",
+		Domain:       "sensor",
+		FriendlyName: "Температура",
+		State:        "23.5",
+		Attributes: map[string]interface{}{
+			"unit_of_measurement": "°C",
+		},
+	}
+	outTemp := FormatSensorDisplay(tempSensor)
+	if !strings.Contains(outTemp, "🌡") || !strings.Contains(outTemp, "23.5 °C") {
+		t.Errorf("unexpected temperature formatting: %s", outTemp)
+	}
+
+	binSensorOn := ha.Entity{
+		EntityID:     "binary_sensor.leak",
+		Domain:       "binary_sensor",
+		FriendlyName: "Датчик протечки",
+		State:        "on",
+	}
+	outBin := FormatSensorDisplay(binSensorOn)
+	if !strings.Contains(outBin, "🔴 ДА") {
+		t.Errorf("unexpected binary sensor formatting for on: %s", outBin)
+	}
+
+	binSensorOff := ha.Entity{
+		EntityID:     "binary_sensor.leak",
+		Domain:       "binary_sensor",
+		FriendlyName: "Датчик протечки",
+		State:        "off",
+	}
+	outBinOff := FormatSensorDisplay(binSensorOff)
+	if !strings.Contains(outBinOff, "⚪ Нет") {
+		t.Errorf("unexpected binary sensor formatting for off: %s", outBinOff)
+	}
+}
+
 

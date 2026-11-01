@@ -65,7 +65,15 @@ type Entity struct {
 	IsHidden     bool                   `json:"is_hidden,omitempty"`     // true, если скрыто
 	DeviceID     string                 `json:"device_id,omitempty"`     // ID физического устройства в HA
 	DeviceName   string                 `json:"device_name,omitempty"`   // Название физического устройства
+	AreaID       string                 `json:"area_id,omitempty"`       // ID комнаты (area) в HA
+	AreaName     string                 `json:"area_name,omitempty"`     // Название комнаты (area)
 	Attributes   map[string]interface{} `json:"attributes,omitempty"`    // Атрибуты (min, max, step, options, unit_of_measurement и др.)
+}
+
+// Area представляет комнату (зону) в Home Assistant.
+type Area struct {
+	AreaID string `json:"area_id"`
+	Name   string `json:"name"`
 }
 
 // DeviceConfigGroup группирует конфигурационные сущности одного физического устройства.
