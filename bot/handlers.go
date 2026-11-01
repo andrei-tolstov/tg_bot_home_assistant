@@ -68,6 +68,63 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 }
 
 
+// extractDomainFromEntity возвращает домен сущности из entity_id.
+func extractDomainFromEntity(entityID string) string {
+	if dotIdx := strings.Index(entityID, "."); dotIdx != -1 {
+		return entityID[:dotIdx]
+	}
+	return entityID
+}
+
+// parseDomainToggleCallback разбирает параметры переключения устройства в категории.
+// Поддерживает как короткий формат (ref:page), так и полный (domain:ref:page).
+func parseDomainToggleCallback(raw string) (domain string, ref string, page int) {
+	parts := strings.Split(raw, ":")
+	if len(parts) >= 3 {
+		domain = parts[0]
+		ref = parts[1]
+		page, _ = strconv.Atoi(parts[2])
+	} else if len(parts) == 2 {
+		ref = parts[0]
+		page, _ = strconv.Atoi(parts[1])
+	} else if len(parts) == 1 {
+		ref = parts[0]
+	}
+	return domain, ref, page
+}
+
+// formatOperationStatus формирует краткий текст статуса операции для всплывающего уведомления в Telegram.
+func formatOperationStatus(entityID string, stateObj *ha.EntityState) string {
+	if stateObj == nil {
+		return "✅ Состояние переключено"
+	}
+	name := entityID
+	if stateObj.Attributes != nil {
+		if fn, ok := stateObj.Attributes["friendly_name"].(string); ok && fn != "" {
+			name = fn
+		}
+	}
+	var text string
+	switch stateObj.State {
+	case "on":
+		text = fmt.Sprintf("🟢 %s: ВКЛ", name)
+	case "off":
+		text = fmt.Sprintf("⚪ %s: ВЫКЛ", name)
+	case "open", "unlocked":
+		text = fmt.Sprintf("🟢 %s: %s", name, strings.ToUpper(stateObj.State))
+	case "closed", "locked":
+		text = fmt.Sprintf("⚪ %s: %s", name, strings.ToUpper(stateObj.State))
+	default:
+		text = fmt.Sprintf("✅ %s: %s", name, stateObj.State)
+	}
+
+	runes := []rune(text)
+	if len(runes) > 190 {
+		return string(runes[:187]) + "..."
+	}
+	return text
+}
+
 // resolveControlService определяет домен, метод сервиса и параметры для сущности на основе ее типа и состояния.
 func resolveControlService(entityID, currentState string) (string, string, map[string]interface{}) {
 	domain := strings.Split(entityID, ".")[0]
@@ -462,12 +519,15 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 			page, _ = strconv.Atoi(parts[1])
 		}
 
-		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "⏳ Переключаю..."))
 		success, msg := b.toggleEntity(entityID)
 		if !success {
 			_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, fmt.Sprintf("❌ Ошибка: %s", msg)))
 			return
 		}
+
+		stateObj, _ := b.haClient.GetEntityState(entityID)
+		statusText := formatOperationStatus(entityID, stateObj)
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, statusText))
 
 		b.showAllDevicesMenu(chatID, messageID, true, page)
 		return
@@ -524,21 +584,23 @@ func (b *Bot) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 
 	if strings.HasPrefix(cb.Data, "dt:") {
 		raw := strings.TrimPrefix(cb.Data, "dt:")
-		parts := strings.Split(raw, ":")
-		entityID := b.resolveEntityRef(parts[0])
-		page := 0
-		if len(parts) > 1 {
-			page, _ = strconv.Atoi(parts[1])
+		domain, ref, page := parseDomainToggleCallback(raw)
+		entityID := b.resolveEntityRef(ref)
+		if domain == "" {
+			domain = extractDomainFromEntity(entityID)
 		}
 
-		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, "⏳ Переключаю..."))
 		success, msg := b.toggleEntity(entityID)
 		if !success {
 			_, _ = b.api.Request(tgbotapi.NewCallbackWithAlert(cb.ID, fmt.Sprintf("❌ Ошибка: %s", msg)))
 			return
 		}
 
-		b.showDomainDevicesMenu(cb.ID, chatID, messageID, parts[0], page)
+		stateObj, _ := b.haClient.GetEntityState(entityID)
+		statusText := formatOperationStatus(entityID, stateObj)
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, statusText))
+
+		b.showDomainDevicesMenu(cb.ID, chatID, messageID, domain, page)
 		return
 	}
 
