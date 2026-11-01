@@ -83,6 +83,7 @@ type Entity struct {
 	AreaID       string                 `json:"area_id,omitempty"`       // ID комнаты (area) в HA
 	AreaName     string                 `json:"area_name,omitempty"`     // Название комнаты (area)
 	Attributes   map[string]interface{} `json:"attributes,omitempty"`    // Атрибуты (min, max, step, options, unit_of_measurement и др.)
+	ChildEntities []Entity              `json:"child_entities,omitempty"` // Дочерние/связанные управляемые сущности одного физического устройства
 }
 
 // Area представляет комнату (зону) в Home Assistant.

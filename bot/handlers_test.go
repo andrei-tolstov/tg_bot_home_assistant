@@ -237,3 +237,20 @@ func TestSensorControllableProtection(t *testing.T) {
 	}
 }
 
+func TestMultiRelayStatusFormat(t *testing.T) {
+	// Проверяем статусное сообщение при переключении одного из реле устройства
+	status := formatOperationStatus("switch.cuco_v2eur_8015_physical_control_locked", &ha.EntityState{
+		EntityID: "switch.cuco_v2eur_8015_physical_control_locked",
+		State:    "off",
+		Attributes: map[string]interface{}{
+			"friendly_name": "РозеткаКондер Блокировка физического управления",
+		},
+	})
+
+	expected := "⚪ РозеткаКондер Блокировка физического управления: ВЫКЛ"
+	if status != expected {
+		t.Errorf("expected %q, got %q", expected, status)
+	}
+}
+
+

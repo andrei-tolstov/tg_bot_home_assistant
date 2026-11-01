@@ -461,13 +461,155 @@ func (c *Client) GetAllEntities() (bool, []Entity, string) {
 }
 
 
-// GetControllableEntities возвращает список сущностей для отображения в списках устройств и комнат.
-// Включает:
-// 1. Все управляемые сущности (light, switch, fan, etc.) без категорий "config", "diagnostic" и скрытых.
-// 2. Датчики (sensor, binary_sensor) для автономных сенсоров или физических устройств, у которых НЕТ управляющих сущностей.
-// Датчики физических устройств, имеющих управляющие сущности (например, батарея пылесоса, мощность розетки),
-// исключаются из общего списка во избежание дублирования (они доступны в меню устройства через «Показания датчиков»).
-func (c *Client) GetControllableEntities() (bool, []Entity, string) {
+// scorePrimaryEntity вычисляет оценку сущности для выбора главной в группе одного физического устройства.
+// Чем выше оценка, тем вероятнее сущность является основным реле/переключателем.
+func scorePrimaryEntity(ent Entity) int {
+	score := 0
+
+	// 1. Точное совпадение имени сущности с именем устройства
+	if ent.DeviceName != "" && strings.EqualFold(strings.TrimSpace(ent.FriendlyName), strings.TrimSpace(ent.DeviceName)) {
+		score += 100
+	}
+
+	nameLower := strings.ToLower(ent.FriendlyName)
+	idLower := strings.ToLower(ent.EntityID)
+
+	// 2. Вспомогательные суффиксы и ключевые слова снижают приоритет
+	auxKeywords := []string{
+		"блокировк", "задержк", "lock", "delay", "timer", "таймер",
+		"led", "индикатор", "подсветк", "child", "защит", "safety",
+	}
+	for _, kw := range auxKeywords {
+		if strings.Contains(nameLower, kw) || strings.Contains(idLower, kw) {
+			score -= 50
+			break
+		}
+	}
+
+	// 3. Более короткий ID обычно принадлежит основной сущности
+	score -= len(ent.EntityID)
+
+	return score
+}
+
+// GroupEntitiesByDevice объединяет сущности одного физического устройства (с одинаковым DeviceID)
+// в одну репрезентативную карточку устройства, сохраняя все реле в поле ChildEntities.
+func GroupEntitiesByDevice(entities []Entity) []Entity {
+	if len(entities) == 0 {
+		return entities
+	}
+
+	var order []string
+	groups := make(map[string][]Entity)
+
+	for _, ent := range entities {
+		key := ent.DeviceID
+		// Группируем по DeviceID только управляемые сущности (реле, выключатели, свет и др.).
+		// Неуправляемые сущности (датчики) и автономные сущности не объединяются между собой.
+		if key == "" || !IsControllableDomain(ent.Domain) {
+			key = "ent:" + ent.EntityID
+		}
+		if _, exists := groups[key]; !exists {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], ent)
+	}
+
+	result := make([]Entity, 0, len(order))
+	for _, key := range order {
+		itemGroup := groups[key]
+		if len(itemGroup) == 1 {
+			ent := itemGroup[0]
+			if ent.DeviceName != "" && (ent.FriendlyName == ent.EntityID || ent.FriendlyName == "") {
+				ent.FriendlyName = ent.DeviceName
+			}
+			ent.ChildEntities = itemGroup
+			result = append(result, ent)
+			continue
+		}
+
+		// Выбираем главную сущность
+		bestIdx := 0
+		bestScore := scorePrimaryEntity(itemGroup[0])
+		for i := 1; i < len(itemGroup); i++ {
+			s := scorePrimaryEntity(itemGroup[i])
+			if s > bestScore {
+				bestScore = s
+				bestIdx = i
+			}
+		}
+
+		primary := itemGroup[bestIdx]
+		rep := primary
+
+		// Название устройства из Home Assistant
+		if rep.DeviceName != "" {
+			rep.FriendlyName = rep.DeviceName
+		}
+
+		// Вычисление агрегированного состояния
+		hasOn := false
+		for _, child := range itemGroup {
+			st := strings.ToLower(child.State)
+			if st == "on" || st == "open" || st == "unlocked" {
+				hasOn = true
+				break
+			}
+		}
+		if hasOn {
+			rep.State = "on"
+		} else {
+			rep.State = "off"
+		}
+
+		// Сортируем дочерние сущности: сначала главная, затем по имени
+		sortedChildren := make([]Entity, len(itemGroup))
+		copy(sortedChildren, itemGroup)
+		sort.SliceStable(sortedChildren, func(i, j int) bool {
+			s1 := scorePrimaryEntity(sortedChildren[i])
+			s2 := scorePrimaryEntity(sortedChildren[j])
+			if s1 != s2 {
+				return s1 > s2
+			}
+			return strings.ToLower(sortedChildren[i].FriendlyName) < strings.ToLower(sortedChildren[j].FriendlyName)
+		})
+		rep.ChildEntities = sortedChildren
+
+		result = append(result, rep)
+	}
+
+	return result
+}
+
+// FilterDeviceControllableEntities возвращает все активные управляемые сущности (light, switch и др.)
+// конкретного физического устройства.
+func FilterDeviceControllableEntities(allEntities []Entity, deviceID string) []Entity {
+	if deviceID == "" {
+		return nil
+	}
+
+	var result []Entity
+	for _, ent := range allEntities {
+		if ent.DeviceID == deviceID && IsControllableDomain(ent.Domain) &&
+			ent.Category != "config" && ent.Category != "diagnostic" && !ent.IsHidden {
+			result = append(result, ent)
+		}
+	}
+
+	sort.SliceStable(result, func(i, j int) bool {
+		s1 := scorePrimaryEntity(result[i])
+		s2 := scorePrimaryEntity(result[j])
+		if s1 != s2 {
+			return s1 > s2
+		}
+		return strings.ToLower(result[i].FriendlyName) < strings.ToLower(result[j].FriendlyName)
+	})
+
+	return result
+}
+
+// getRawControllableEntities возвращает список сущностей до группировки по устройствам.
+func (c *Client) getRawControllableEntities() (bool, []Entity, string) {
 	ok, allEntities, errMsg := c.GetAllEntities()
 	if !ok {
 		return false, nil, errMsg
@@ -502,6 +644,24 @@ func (c *Client) GetControllableEntities() (bool, []Entity, string) {
 		}
 	}
 
+	return true, result, "Успешно"
+}
+
+// GetControllableEntities возвращает список сущностей для отображения в списках устройств и комнат.
+// Включает:
+// 1. Все управляемые сущности (light, switch, fan, etc.) без категорий "config", "diagnostic" и скрытых,
+//    сгруппированные по физическим устройствам (ChildEntities).
+// 2. Датчики (sensor, binary_sensor) для автономных сенсоров или физических устройств, у которых НЕТ управляющих сущностей.
+// Датчики физических устройств, имеющих управляющие сущности (например, батарея пылесоса, мощность розетки),
+// исключаются из общего списка во избежание дублирования (они доступны в меню устройства через «Показания датчиков»).
+func (c *Client) GetControllableEntities() (bool, []Entity, string) {
+	ok, raw, errMsg := c.getRawControllableEntities()
+	if !ok {
+		return false, nil, errMsg
+	}
+
+	result := GroupEntitiesByDevice(raw)
+
 	sort.Slice(result, func(i, j int) bool {
 		p1 := GetDomainPriority(result[i].Domain)
 		p2 := GetDomainPriority(result[j].Domain)
@@ -515,10 +675,10 @@ func (c *Client) GetControllableEntities() (bool, []Entity, string) {
 	return true, result, "Успешно"
 }
 
-// GetEntitiesGroupedByDomain возвращает карту {domain: [список управляемых сущностей]}.
-// Исключает config/diagnostic/hidden.
+// GetEntitiesGroupedByDomain возвращает карту {domain: [список управляемых устройств]}.
+// Исключает config/diagnostic/hidden. Несколько реле одного устройства объединяются в одно устройство.
 func (c *Client) GetEntitiesGroupedByDomain() (bool, map[string][]Entity, string) {
-	ok, entities, errMsg := c.GetControllableEntities()
+	ok, entities, errMsg := c.getRawControllableEntities()
 	if !ok {
 		return false, nil, errMsg
 	}
@@ -530,6 +690,13 @@ func (c *Client) GetEntitiesGroupedByDomain() (bool, map[string][]Entity, string
 
 	for _, entity := range entities {
 		grouped[entity.Domain] = append(grouped[entity.Domain], entity)
+	}
+
+	for domain := range grouped {
+		grouped[domain] = GroupEntitiesByDevice(grouped[domain])
+		sort.Slice(grouped[domain], func(i, j int) bool {
+			return strings.ToLower(grouped[domain][i].FriendlyName) < strings.ToLower(grouped[domain][j].FriendlyName)
+		})
 	}
 
 	return true, grouped, "Успешно"
@@ -545,9 +712,9 @@ func (c *Client) GetEntitiesForDomain(domain string) (bool, []Entity, string) {
 }
 
 // GetEntitiesGroupedByArea возвращает сгруппированные по комнатам управляемые сущности и карту названий комнат.
-// Исключает config/diagnostic/hidden.
+// Исключает config/diagnostic/hidden. Реле одного устройства в комнате объединяются в одно устройство.
 func (c *Client) GetEntitiesGroupedByArea() (bool, map[string][]Entity, map[string]string, string) {
-	ok, entities, errMsg := c.GetControllableEntities()
+	ok, entities, errMsg := c.getRawControllableEntities()
 	if !ok {
 		return false, nil, nil, errMsg
 	}
@@ -582,6 +749,7 @@ func (c *Client) GetEntitiesGroupedByArea() (bool, map[string][]Entity, map[stri
 	}
 
 	for aID := range grouped {
+		grouped[aID] = GroupEntitiesByDevice(grouped[aID])
 		sort.Slice(grouped[aID], func(i, j int) bool {
 			p1 := GetDomainPriority(grouped[aID][i].Domain)
 			p2 := GetDomainPriority(grouped[aID][j].Domain)

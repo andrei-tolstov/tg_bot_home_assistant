@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -108,6 +109,12 @@ func WarmupEntityRefs(entities []ha.Entity) {
 		if ent.AreaID != "" {
 			hash := fmt.Sprintf("a_%08x", crc32.ChecksumIEEE([]byte(ent.AreaID)))
 			entityHashMap[hash] = ent.AreaID
+		}
+		for _, child := range ent.ChildEntities {
+			if child.EntityID != "" {
+				hash := fmt.Sprintf("h_%08x", crc32.ChecksumIEEE([]byte(child.EntityID)))
+				entityHashMap[hash] = child.EntityID
+			}
 		}
 	}
 }
@@ -231,6 +238,31 @@ func FormatSensorValue(raw string) string {
 	return raw
 }
 
+// FormatChildEntityName удаляет избыточный префикс названия устройства из имени сущности
+// для компактного и понятного отображения на инлайн-кнопках в карточке устройства.
+func FormatChildEntityName(friendlyName, deviceName string) string {
+	fn := strings.TrimSpace(friendlyName)
+	dn := strings.TrimSpace(deviceName)
+	if dn == "" || fn == "" {
+		return fn
+	}
+
+	fnLower := strings.ToLower(fn)
+	dnLower := strings.ToLower(dn)
+
+	if strings.HasPrefix(fnLower, dnLower) {
+		remainder := strings.TrimSpace(fn[len(dn):])
+		remainder = strings.TrimLeft(remainder, "-–—:.,_ ")
+		if remainder != "" {
+			r := []rune(remainder)
+			r[0] = unicode.ToUpper(r[0])
+			return string(r)
+		}
+	}
+
+	return fn
+}
+
 // FormatDeviceButton форматирует текст для кнопки устройства с иконкой и текущим состоянием.
 func FormatDeviceButton(item ha.Entity) string {
 	icon, ok := DomainIcons[item.Domain]
@@ -239,7 +271,21 @@ func FormatDeviceButton(item ha.Entity) string {
 	}
 
 	var statusBadge string
-	if item.Domain == "sensor" {
+	if len(item.ChildEntities) > 1 {
+		onCount := 0
+		for _, child := range item.ChildEntities {
+			valLower := strings.ToLower(child.State)
+			if valLower == "on" || valLower == "open" || valLower == "unlocked" {
+				onCount++
+			}
+		}
+		total := len(item.ChildEntities)
+		if onCount > 0 {
+			statusBadge = fmt.Sprintf("🟢 ВКЛ (%d/%d)", onCount, total)
+		} else {
+			statusBadge = "⚪ ВЫКЛ"
+		}
+	} else if item.Domain == "sensor" {
 		sensorIcon := GetSensorIcon(item)
 		if sensorIcon != "" {
 			icon = sensorIcon
@@ -579,10 +625,11 @@ func GetAreaDevicesKeyboard(areaID, areaName string, devices []ha.Entity, page, 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// GetDeviceMenuKeyboard формирует контекстное меню управления выбранным устройством с 3 кнопками:
-// 1. Вкл\Выкл (только если устройство управляемое: ha.IsControllableDomain(entity.Domain))
-// 2. Конфигурация
-// 3. Показания датчиков (только если hasSensors == true)
+// GetDeviceMenuKeyboard формирует контекстное меню управления выбранным устройством:
+// - Для устройств с несколькими реле: кнопки переключения для каждого реле отдельно
+// - Для одиночных устройств: кнопка Вкл\Выкл (только если устройство управляемое: ha.IsControllableDomain(entity.Domain))
+// - Кнопка «Конфигурация»
+// - Кнопка «Показания датчиков» (только если hasSensors == true)
 // а также навигационными кнопками «Обновить» и «Назад к списку».
 func GetDeviceMenuKeyboard(entity ha.Entity, hasSensors bool, srcType, srcID string, page int) tgbotapi.InlineKeyboardMarkup {
 	entRef := GetEntityRef(entity.EntityID)
@@ -590,10 +637,48 @@ func GetDeviceMenuKeyboard(entity ha.Entity, hasSensors bool, srcType, srcID str
 
 	var rows [][]tgbotapi.InlineKeyboardButton
 
-	// 1. Кнопка Вкл\Выкл (только для управляемых устройств)
-	if ha.IsControllableDomain(entity.Domain) {
+	// 1. Кнопки управления реле/выключателями
+	if len(entity.ChildEntities) > 1 {
+		// Устройство с несколькими реле: выводим отдельную кнопку для каждого управляемого реле
+		for _, child := range entity.ChildEntities {
+			if !ha.IsControllableDomain(child.Domain) {
+				continue
+			}
+			childRef := GetCompactEntityRef(child.EntityID)
+			childName := FormatChildEntityName(child.FriendlyName, entity.DeviceName)
+			if childName == "" {
+				childName = child.FriendlyName
+			}
+
+			cIcon := DomainIcons[child.Domain]
+			if cIcon == "" {
+				cIcon = "🔌"
+			}
+
+			var childBadge string
+			switch strings.ToLower(child.State) {
+			case "on":
+				childBadge = "🟢 ВКЛ"
+			case "off":
+				childBadge = "⚪ ВЫКЛ"
+			case "open", "unlocked":
+				childBadge = fmt.Sprintf("🟢 %s", strings.ToUpper(child.State))
+			case "closed", "locked":
+				childBadge = fmt.Sprintf("⚪ %s", strings.ToUpper(child.State))
+			default:
+				childBadge = fmt.Sprintf("[%s]", child.State)
+			}
+
+			btnText := fmt.Sprintf("%s %s: %s", cIcon, childName, childBadge)
+			cbData := fmt.Sprintf("d_tog:%s:%s:%s:%d", srcType, srcRef, childRef, page)
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(btnText, cbData),
+			))
+		}
+	} else if ha.IsControllableDomain(entity.Domain) {
+		// Одиночное управляемое устройство
 		toggleText := "⚡ Вкл / Выкл"
-		switch entity.State {
+		switch strings.ToLower(entity.State) {
 		case "on":
 			toggleText = "⚪ Выключить (ВЫКЛ)"
 		case "off":

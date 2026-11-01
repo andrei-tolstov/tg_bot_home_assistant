@@ -849,3 +849,110 @@ func TestClient_AreasAndSensors(t *testing.T) {
 	}
 }
 
+func TestGroupEntitiesByDevice_MultiRelay(t *testing.T) {
+	// Пользовательский кейс:
+	// switch.cuco_v2eur_8015_physical_control_locked РозеткаКондер Блокировка физического управления
+	// switch.cuco_v2eur_8015_delay РозеткаКондер Задержка
+	// switch.cuco_v2eur_8015 РозеткаКондер (основное реле)
+	input := []Entity{
+		{
+			EntityID:     "switch.cuco_v2eur_8015_physical_control_locked",
+			Domain:       "switch",
+			FriendlyName: "РозеткаКондер Блокировка физического управления",
+			State:        "off",
+			DeviceID:     "dev_cuco_8015",
+			DeviceName:   "РозеткаКондер",
+		},
+		{
+			EntityID:     "switch.cuco_v2eur_8015_delay",
+			Domain:       "switch",
+			FriendlyName: "РозеткаКондер Задержка",
+			State:        "off",
+			DeviceID:     "dev_cuco_8015",
+			DeviceName:   "РозеткаКондер",
+		},
+		{
+			EntityID:     "switch.cuco_v2eur_8015",
+			Domain:       "switch",
+			FriendlyName: "РозеткаКондер",
+			State:        "on",
+			DeviceID:     "dev_cuco_8015",
+			DeviceName:   "РозеткаКондер",
+		},
+		{
+			EntityID:     "switch.standalone_relay",
+			Domain:       "switch",
+			FriendlyName: "Автономное реле",
+			State:        "off",
+			DeviceID:     "",
+		},
+	}
+
+	grouped := GroupEntitiesByDevice(input)
+	if len(grouped) != 2 {
+		t.Fatalf("expected 2 entities after grouping, got %d", len(grouped))
+	}
+
+	cucoDev := grouped[0]
+	if cucoDev.FriendlyName != "РозеткаКондер" {
+		t.Errorf("expected DeviceName РозеткаКондер, got %s", cucoDev.FriendlyName)
+	}
+	if cucoDev.EntityID != "switch.cuco_v2eur_8015" {
+		t.Errorf("expected primary entity to be main switch switch.cuco_v2eur_8015, got %s", cucoDev.EntityID)
+	}
+	if cucoDev.State != "on" {
+		t.Errorf("expected aggregated state 'on', got %s", cucoDev.State)
+	}
+	if len(cucoDev.ChildEntities) != 3 {
+		t.Fatalf("expected 3 child entities, got %d", len(cucoDev.ChildEntities))
+	}
+
+	// Standalone entity
+	standalone := grouped[1]
+	if standalone.EntityID != "switch.standalone_relay" {
+		t.Errorf("expected standalone_relay, got %s", standalone.EntityID)
+	}
+}
+
+func TestFilterDeviceControllableEntities(t *testing.T) {
+	allEntities := []Entity{
+		{
+			EntityID:     "switch.cuco_locked",
+			Domain:       "switch",
+			FriendlyName: "Розетка Блокировка",
+			DeviceID:     "dev_socket",
+			Category:     "",
+		},
+		{
+			EntityID:     "switch.cuco_delay",
+			Domain:       "switch",
+			FriendlyName: "Розетка Задержка",
+			DeviceID:     "dev_socket",
+			Category:     "",
+		},
+		{
+			EntityID:     "number.cuco_countdown",
+			Domain:       "number",
+			FriendlyName: "Таймер",
+			DeviceID:     "dev_socket",
+			Category:     "config", // должна быть исключена
+		},
+		{
+			EntityID:     "sensor.cuco_power",
+			Domain:       "sensor",
+			FriendlyName: "Мощность",
+			DeviceID:     "dev_socket",
+			Category:     "", // sensor не IsControllableDomain
+		},
+	}
+
+	controllable := FilterDeviceControllableEntities(allEntities, "dev_socket")
+	if len(controllable) != 2 {
+		t.Fatalf("expected 2 controllable entities, got %d", len(controllable))
+	}
+	if controllable[0].EntityID != "switch.cuco_delay" && controllable[1].EntityID != "switch.cuco_delay" {
+		t.Errorf("expected switch.cuco_delay in results")
+	}
+}
+
+

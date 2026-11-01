@@ -1018,4 +1018,146 @@ func TestGetDeviceConfigKeyboard_CallbackDataLimits(t *testing.T) {
 	}
 }
 
+func TestFormatChildEntityName(t *testing.T) {
+	tests := []struct {
+		friendlyName string
+		deviceName   string
+		expected     string
+	}{
+		{
+			friendlyName: "РозеткаКондер Блокировка физического управления",
+			deviceName:   "РозеткаКондер",
+			expected:     "Блокировка физического управления",
+		},
+		{
+			friendlyName: "РозеткаКондер Задержка",
+			deviceName:   "РозеткаКондер",
+			expected:     "Задержка",
+		},
+		{
+			friendlyName: "РозеткаКондер - Реле 1",
+			deviceName:   "РозеткаКондер",
+			expected:     "Реле 1",
+		},
+		{
+			friendlyName: "РозеткаКондер: USB Порт",
+			deviceName:   "РозеткаКондер",
+			expected:     "USB Порт",
+		},
+		{
+			friendlyName: "РозеткаКондер",
+			deviceName:   "РозеткаКондер",
+			expected:     "РозеткаКондер",
+		},
+		{
+			friendlyName: "Клавиша 1",
+			deviceName:   "Выключатель",
+			expected:     "Клавиша 1",
+		},
+		{
+			friendlyName: "Выключатель",
+			deviceName:   "",
+			expected:     "Выключатель",
+		},
+	}
+
+	for _, tt := range tests {
+		got := FormatChildEntityName(tt.friendlyName, tt.deviceName)
+		if got != tt.expected {
+			t.Errorf("FormatChildEntityName(%q, %q) = %q, expected %q", tt.friendlyName, tt.deviceName, got, tt.expected)
+		}
+	}
+}
+
+func TestFormatDeviceButton_MultiRelay(t *testing.T) {
+	dev := ha.Entity{
+		EntityID:     "switch.cuco_v2eur_8015",
+		Domain:       "switch",
+		FriendlyName: "РозеткаКондер",
+		State:        "off",
+		ChildEntities: []ha.Entity{
+			{EntityID: "switch.cuco_locked", State: "off"},
+			{EntityID: "switch.cuco_delay", State: "off"},
+		},
+	}
+
+	gotOff := FormatDeviceButton(dev)
+	expectedOff := "🔌 РозеткаКондер: ⚪ ВЫКЛ"
+	if gotOff != expectedOff {
+		t.Errorf("expected %q, got %q", expectedOff, gotOff)
+	}
+
+	// 1 из 2 включено
+	dev.ChildEntities[1].State = "on"
+	got1On := FormatDeviceButton(dev)
+	expected1On := "🔌 РозеткаКондер: 🟢 ВКЛ (1/2)"
+	if got1On != expected1On {
+		t.Errorf("expected %q, got %q", expected1On, got1On)
+	}
+
+	// 2 из 2 включено
+	dev.ChildEntities[0].State = "on"
+	got2On := FormatDeviceButton(dev)
+	expected2On := "🔌 РозеткаКондер: 🟢 ВКЛ (2/2)"
+	if got2On != expected2On {
+		t.Errorf("expected %q, got %q", expected2On, got2On)
+	}
+}
+
+func TestGetDeviceMenuKeyboard_MultiRelay(t *testing.T) {
+	dev := ha.Entity{
+		EntityID:     "switch.cuco_v2eur_8015",
+		Domain:       "switch",
+		FriendlyName: "РозеткаКондер",
+		DeviceName:   "РозеткаКондер",
+		State:        "on",
+		ChildEntities: []ha.Entity{
+			{
+				EntityID:     "switch.cuco_v2eur_8015_physical_control_locked",
+				Domain:       "switch",
+				FriendlyName: "РозеткаКондер Блокировка физического управления",
+				State:        "off",
+			},
+			{
+				EntityID:     "switch.cuco_v2eur_8015_delay",
+				Domain:       "switch",
+				FriendlyName: "РозеткаКондер Задержка",
+				State:        "on",
+			},
+		},
+	}
+
+	longArea := "komnata_gostinaia_pervyi_etazh"
+	kb := GetDeviceMenuKeyboard(dev, true, "r", longArea, 1)
+
+	// Проверяем, что есть 2 отдельные кнопки реле
+	if len(kb.InlineKeyboard) < 5 {
+		t.Fatalf("expected at least 5 rows in keyboard, got %d", len(kb.InlineKeyboard))
+	}
+
+	row0Btn := kb.InlineKeyboard[0][0]
+	if row0Btn.Text != "🔌 Блокировка физического управления: ⚪ ВЫКЛ" {
+		t.Errorf("unexpected button 0 text: %s", row0Btn.Text)
+	}
+
+	row1Btn := kb.InlineKeyboard[1][0]
+	if row1Btn.Text != "🔌 Задержка: 🟢 ВКЛ" {
+		t.Errorf("unexpected button 1 text: %s", row1Btn.Text)
+	}
+
+	// Проверяем лимит 64 байт на callback_data для всех кнопок
+	for i, row := range kb.InlineKeyboard {
+		for j, btn := range row {
+			if btn.CallbackData == nil {
+				continue
+			}
+			cb := *btn.CallbackData
+			if len([]byte(cb)) > 64 {
+				t.Errorf("button [%d][%d] (%s) callback_data %q exceeds 64 bytes: %d", i, j, btn.Text, cb, len([]byte(cb)))
+			}
+		}
+	}
+}
+
+
 

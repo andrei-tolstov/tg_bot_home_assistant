@@ -469,6 +469,30 @@ func (b *Bot) showDeviceMenu(cbID string, chatID int64, messageID int, entityID 
 		}
 	}
 
+	// Если сущность привязана к физическому устройству, находим все его управляемые реле
+	if targetEntity.DeviceID != "" {
+		controllable := ha.FilterDeviceControllableEntities(allEntities, targetEntity.DeviceID)
+		if len(controllable) > 1 {
+			targetEntity.ChildEntities = controllable
+			if targetEntity.DeviceName != "" {
+				targetEntity.FriendlyName = targetEntity.DeviceName
+			}
+			hasOn := false
+			for _, child := range controllable {
+				st := strings.ToLower(child.State)
+				if st == "on" || st == "open" || st == "unlocked" {
+					hasOn = true
+					break
+				}
+			}
+			if hasOn {
+				targetEntity.State = "on"
+			} else {
+				targetEntity.State = "off"
+			}
+		}
+	}
+
 	sensors := ha.FilterDeviceSensors(allEntities, targetEntity.DeviceID, targetEntity.EntityID)
 	hasSensors := len(sensors) > 0
 
@@ -493,8 +517,34 @@ func (b *Bot) showDeviceMenu(cbID string, chatID int64, messageID int, entityID 
 		domainName = targetEntity.Domain
 	}
 
+	statusLabel := "📊 <b>Состояние:</b>"
 	statusDisplay := targetEntity.State
-	if targetEntity.Domain == "sensor" {
+	if len(targetEntity.ChildEntities) > 1 {
+		statusLabel = "📊 <b>Реле и переключатели:</b>"
+		var lines []string
+		for _, child := range targetEntity.ChildEntities {
+			childName := FormatChildEntityName(child.FriendlyName, targetEntity.DeviceName)
+			cIcon := DomainIcons[child.Domain]
+			if cIcon == "" {
+				cIcon = "🔌"
+			}
+			st := child.State
+			switch strings.ToLower(st) {
+			case "on":
+				st = "🟢 ВКЛ"
+			case "off":
+				st = "⚪ ВЫКЛ"
+			case "open", "unlocked":
+				st = fmt.Sprintf("🟢 %s", strings.ToUpper(st))
+			case "closed", "locked":
+				st = fmt.Sprintf("⚪ %s", strings.ToUpper(st))
+			default:
+				st = fmt.Sprintf("[%s]", st)
+			}
+			lines = append(lines, fmt.Sprintf("  • %s %s: <b>%s</b>", cIcon, html.EscapeString(childName), st))
+		}
+		statusDisplay = "\n" + strings.Join(lines, "\n")
+	} else if targetEntity.Domain == "sensor" {
 		unit := ""
 		if targetEntity.Attributes != nil {
 			if u, ok := targetEntity.Attributes["unit_of_measurement"].(string); ok && u != "" {
@@ -522,18 +572,26 @@ func (b *Bot) showDeviceMenu(cbID string, chatID int64, messageID int, entityID 
 		}
 	}
 
+	var entityField string
+	if len(targetEntity.ChildEntities) > 1 {
+		entityField = fmt.Sprintf("🔌 <b>Устройство:</b> <code>%s</code>\n", html.EscapeString(targetEntity.FriendlyName))
+	} else {
+		entityField = fmt.Sprintf("🏷 <b>Сущность:</b> <code>%s</code>\n", html.EscapeString(targetEntity.EntityID))
+	}
+
 	text := fmt.Sprintf(
 		"%s <b>%s</b>\n\n"+
-			"🏷 <b>Сущность:</b> <code>%s</code>\n"+
+			"%s"+
 			"🏠 <b>Комната:</b> %s\n"+
 			"📁 <b>Категория:</b> %s\n"+
-			"📊 <b>Состояние:</b> %s",
+			"%s %s",
 		icon,
 		html.EscapeString(targetEntity.FriendlyName),
-		html.EscapeString(targetEntity.EntityID),
+		entityField,
 		html.EscapeString(areaDisplay),
 		html.EscapeString(domainName),
-		html.EscapeString(statusDisplay),
+		statusLabel,
+		statusDisplay,
 	)
 
 	keyboard := GetDeviceMenuKeyboard(*targetEntity, hasSensors, srcType, srcID, page)
